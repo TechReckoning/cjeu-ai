@@ -31,7 +31,18 @@ if st.button("Ask") and question.strip():
 
         query_embedding = embedding_response.data[0].embedding
 
-        conn = psycopg.connect("dbname=cjeu_ai user=serbansarbu host=localhost")
+        try:
+            database_url = st.secrets["DATABASE_URL"]
+            conn = psycopg.connect(database_url)
+        except Exception:
+            conn = psycopg.connect(
+                host=os.getenv("SUPABASE_HOST"),
+                port=os.getenv("SUPABASE_PORT"),
+                dbname=os.getenv("SUPABASE_DBNAME"),
+                user=os.getenv("SUPABASE_USER"),
+                password=os.getenv("SUPABASE_PASSWORD"),
+                sslmode="require",
+            )
         register_vector(conn)
 
         results = {}
