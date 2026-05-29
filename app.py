@@ -33,11 +33,13 @@ The information provided by this application is for research and informational p
 Users are solely responsible for independently verifying all information, legal conclusions, citations, and references against the original official sources before relying on them for any legal, professional, academic, or commercial purpose.
 """)
 
-st.title("CJEU AI Research")
+st.title("AMICUS")
+
+st.subheader("Leave the Associate Alone. Ask Amicus.")
 
 st.caption(
-    "Independent legal research tool. "
-    "Not affiliated with the Court of Justice of the European Union or any EU institution. "
+    "Independent AI-powered legal research across Court of Justice of the European Union case law. "
+    "Not affiliated with the CJEU or any EU institution. "
     "AI-generated results may contain errors and must be independently verified."
 )
 
