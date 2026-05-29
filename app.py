@@ -35,7 +35,7 @@ Users are solely responsible for independently verifying all information, legal 
 
 st.title("AMICUS")
 
-st.subheader("Leave the Associate Alone. Ask Amicus.")
+st.subheader("Leave the Junior Alone. Ask Amicus.")
 
 st.caption(
     "Independent AI-powered legal research across Court of Justice of the European Union case law. "
