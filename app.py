@@ -14,7 +14,33 @@ client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
 st.set_page_config(page_title="CJEU AI Research", layout="wide")
 
+with st.sidebar.expander("Data Sources & Disclaimer", expanded=False):
+    st.markdown("""
+### Data Source
+
+This application uses publicly available case law of the Court of Justice of the European Union (CJEU) obtained from the Publications Office of the European Union through the CELLAR repository.
+
+### Independence and Non-Affiliation
+
+This application is an independent legal research tool developed and operated by a private entity. It is not affiliated with, endorsed by, sponsored by, or otherwise connected to the Court of Justice of the European Union, the Publications Office of the European Union, the European Commission, or any other institution, body, office, or agency of the European Union.
+
+### Disclaimer
+
+This application uses artificial intelligence and automated retrieval technologies to assist with legal research. While reasonable efforts are made to ensure accuracy and relevance, the application may generate incomplete, inaccurate, outdated, or misleading information.
+
+The information provided by this application is for research and informational purposes only and does not constitute legal advice.
+
+Users are solely responsible for independently verifying all information, legal conclusions, citations, and references against the original official sources before relying on them for any legal, professional, academic, or commercial purpose.
+""")
+
 st.title("CJEU AI Research")
+
+st.caption(
+    "Independent legal research tool. "
+    "Not affiliated with the Court of Justice of the European Union or any EU institution. "
+    "AI-generated results may contain errors and must be independently verified."
+)
+
 st.caption("Hybrid semantic + full-text search with GPT reranking over CJEU case-law")
 
 question = st.text_area("Legal question", height=100)
