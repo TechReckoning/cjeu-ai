@@ -67,6 +67,10 @@ st.caption(
 
 st.caption("Hybrid semantic + full-text search with GPT reranking over CJEU case-law")
 
+st.info(
+    "Amicus currently searches across 13,954 CJEU decisions and 607,999 indexed case-law paragraphs."
+)
+
 final_limit = st.sidebar.slider("Final sources", 3, 12, 8)
 candidate_limit = st.sidebar.slider("Candidate pool per method", 20, 80, 40)
 
