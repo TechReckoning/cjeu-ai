@@ -12,7 +12,26 @@ load_dotenv()
 
 client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
-st.set_page_config(page_title="CJEU AI Research", layout="wide")
+st.set_page_config(page_title="AMICUS", layout="wide")
+
+
+def get_db_connection():
+    try:
+        database_url = st.secrets["DATABASE_URL"]
+        conn = psycopg.connect(database_url)
+    except Exception:
+        conn = psycopg.connect(
+            host=os.getenv("SUPABASE_HOST"),
+            port=os.getenv("SUPABASE_PORT"),
+            dbname=os.getenv("SUPABASE_DBNAME"),
+            user=os.getenv("SUPABASE_USER"),
+            password=os.getenv("SUPABASE_PASSWORD"),
+            sslmode="require",
+        )
+
+    register_vector(conn)
+    return conn
+
 
 with st.sidebar.expander("Data Sources & Disclaimer", expanded=False):
     st.markdown("""
@@ -33,8 +52,11 @@ The information provided by this application is for research and informational p
 Users are solely responsible for independently verifying all information, legal conclusions, citations, and references against the original official sources before relying on them for any legal, professional, academic, or commercial purpose.
 """)
 
-st.title("AMICUS")
+if st.sidebar.button("Clear Conversation"):
+    st.session_state.messages = []
+    st.rerun()
 
+st.title("AMICUS")
 st.subheader("Leave the Junior Alone. Ask Amicus.")
 
 st.caption(
@@ -45,38 +67,65 @@ st.caption(
 
 st.caption("Hybrid semantic + full-text search with GPT reranking over CJEU case-law")
 
-question = st.text_area("Legal question", height=100)
+final_limit = st.sidebar.slider("Final sources", 3, 12, 8)
+candidate_limit = st.sidebar.slider("Candidate pool per method", 20, 80, 40)
 
-final_limit = st.slider("Final sources", 3, 12, 8)
-candidate_limit = st.slider("Candidate pool per method", 20, 80, 40)
+if "messages" not in st.session_state:
+    st.session_state.messages = []
 
-if st.button("Ask") and question.strip():
+for message in st.session_state.messages:
+    with st.chat_message(message["role"]):
+        st.markdown(message["content"])
+
+question = st.chat_input("Ask Amicus a legal research question...")
+
+if question and question.strip():
+    st.session_state.messages.append({"role": "user", "content": question})
+
+    with st.chat_message("user"):
+        st.markdown(question)
+
+    recent_messages = st.session_state.messages[-10:]
+
+    conversation_context = "\n".join(
+        f"{msg['role'].upper()}: {msg['content']}"
+        for msg in recent_messages
+    )
+
+    with st.spinner("Understanding the follow-up question..."):
+        standalone_prompt = f"""
+You are assisting with EU law legal research.
+
+Rewrite the user's latest message into a standalone legal research question, using the recent conversation context if needed.
+
+Recent conversation:
+{conversation_context}
+
+Latest user message:
+{question}
+
+Return only the standalone question. No markdown.
+"""
+
+        standalone_response = client.responses.create(
+            model="gpt-4.1-mini",
+            input=standalone_prompt
+        )
+
+        retrieval_question = standalone_response.output_text.strip()
+
     with st.spinner("Running hybrid retrieval..."):
         embedding_response = client.embeddings.create(
             model="text-embedding-3-small",
-            input=[question]
+            input=[retrieval_question]
         )
 
         query_embedding = embedding_response.data[0].embedding
 
-        try:
-            database_url = st.secrets["DATABASE_URL"]
-            conn = psycopg.connect(database_url)
-        except Exception:
-            conn = psycopg.connect(
-                host=os.getenv("SUPABASE_HOST"),
-                port=os.getenv("SUPABASE_PORT"),
-                dbname=os.getenv("SUPABASE_DBNAME"),
-                user=os.getenv("SUPABASE_USER"),
-                password=os.getenv("SUPABASE_PASSWORD"),
-                sslmode="require",
-            )
-        register_vector(conn)
-
+        conn = get_db_connection()
         results = {}
 
         with conn.cursor() as cur:
-            # Vector search
             cur.execute("""
                 SELECT
                     id,
@@ -116,7 +165,6 @@ if st.button("Ask") and question.strip():
                     "retrieval_source": "vector"
                 }
 
-            # Full-text keyword search
             cur.execute("""
                 SELECT
                     id,
@@ -131,7 +179,7 @@ if st.button("Ask") and question.strip():
                 WHERE search_vector @@ plainto_tsquery('english', %s)
                 ORDER BY keyword_score DESC
                 LIMIT %s;
-            """, (question, question, candidate_limit))
+            """, (retrieval_question, retrieval_question, candidate_limit))
 
             for row in cur.fetchall():
                 (
@@ -193,11 +241,17 @@ if st.button("Ask") and question.strip():
         rerank_prompt = f"""
 You are a legal relevance reranker for EU Court of Justice case-law.
 
-User question:
+User's standalone research question:
+{retrieval_question}
+
+Original latest user message:
 {question}
 
+Recent conversation:
+{conversation_context}
+
 Task:
-Evaluate each candidate paragraph for legal relevance to the user's question.
+Evaluate each candidate paragraph for legal relevance to the standalone research question.
 
 Scoring:
 10 = directly answers the legal question
@@ -274,16 +328,23 @@ Candidates:
         context = "\n\n".join(context_blocks)
 
         answer_prompt = f"""
-You are a careful EU law research assistant.
+You are Amicus, a careful EU law research assistant.
 
-Answer the user's legal question using ONLY the sources below.
-If the sources are insufficient, say that the current local database is insufficient.
+Answer the user's latest message using ONLY the sources below and the recent conversation context.
+
+If the sources are insufficient, say that the current database is insufficient.
 Do not invent cases, principles, citations, or legal rules.
 
 For every legal proposition, cite the source as:
 (CELEX [number], para. [paragraph_number]).
 
-User question:
+Recent conversation:
+{conversation_context}
+
+Standalone research question used for retrieval:
+{retrieval_question}
+
+Latest user message:
 {question}
 
 Sources:
@@ -295,8 +356,17 @@ Sources:
             input=answer_prompt
         )
 
-    st.subheader("AI Answer")
-    st.write(answer.output_text)
+        assistant_answer = answer.output_text
+
+    st.session_state.messages.append({
+        "role": "assistant",
+        "content": assistant_answer
+    })
+
+    st.session_state.messages = st.session_state.messages[-10:]
+
+    with st.chat_message("assistant"):
+        st.markdown(assistant_answer)
 
     st.subheader("Sources")
 
