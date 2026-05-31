@@ -21,11 +21,11 @@ def run():
     ok = True
 
     # --- CELEX construction (case number -> CELEX) -------------------------
-    ok &= check("C-57/94 -> 61994CJ0057", candidate_celex("C-", "57", "94") == "61994CJ0057")
+    ok &= check("C 57/94 -> 61994CJ0057", candidate_celex("C", "57", "94") == "61994CJ0057")
     ok &= check("207/78 (classic) -> 61978CJ0207", candidate_celex(None, "207", "78") == "61978CJ0207")
-    ok &= check("C-15/90 -> 61990CJ0015", candidate_celex("C-", "15", "90") == "61990CJ0015")
+    ok &= check("C 15/90 -> 61990CJ0015", candidate_celex("C", "15", "90") == "61990CJ0015")
     ok &= check("300/04 -> 62004CJ0300 (2000s century)", candidate_celex(None, "300", "04") == "62004CJ0300")
-    ok &= check("T-1/89 -> 61989TJ0001 (General Court)", candidate_celex("T-", "1", "89") == "61989TJ0001")
+    ok &= check("T 1/89 -> 61989TJ0001 (General Court)", candidate_celex("T", "1", "89") == "61989TJ0001")
 
     # --- Modern citation with pinpoint ------------------------------------
     s = ("...must be interpreted strictly (Case C-57/94 Commission v Italy "
@@ -67,6 +67,34 @@ def run():
     s = "Joined Cases C-267/91 and C-268/91 Keck and Mithouard [1993] ECR I-6097"
     ok &= check("joined: two CELEXes",
                 _celexes(s) == ["61991CJ0267", "61991CJ0268"])
+
+    # --- MODERN style: no "Case" keyword, non-breaking hyphen, ECLI -------
+    # U+2011 non-breaking hyphen, as in real 2014+ judgments.
+    s = ("It is incumbent upon the Member State... (see, to that effect, judgment in "
+         "Banks and Others, C‑178/97, EU:C:2000:169, paragraph 43).")
+    cs = parse_citations(s)
+    ok &= check("modern: resolves C‑178/97 -> 61997CJ0178",
+                _celexes(s) == ["61997CJ0178"])
+    ok &= check("modern: pinpoint 43", cs[0]["cited_paragraph_number"] == 43)
+    ok &= check("modern: type=see (to that effect)", cs[0]["relation_type"] == "see")
+
+    s = ("...declare them as falling within the scope (see, by analogy, judgment in "
+         "FTS, C‑202/97, EU:C:2000:75, paragraph 51).")
+    cs = parse_citations(s)
+    ok &= check("modern: by_analogy + C‑202/97 + para 51",
+                cs[0]["candidate_celex"] == "61997CJ0202"
+                and cs[0]["relation_type"] == "by_analogy"
+                and cs[0]["cited_paragraph_number"] == 51)
+
+    s = ("in response... to the judgments in Commission v Belgium (C‑222/08, "
+         "EU:C:2010:583) and Base and Others (C‑389/08, EU:C:2010:584), adopted...")
+    ok &= check("modern: two parenthetical cites resolved",
+                _celexes(s) == ["62008CJ0222", "62008CJ0389"])
+
+    # A modern token that IS preceded by 'Case' must not be double-counted.
+    s = "as held in Case C‑413/14 P Intel [2017] paragraph 138"
+    ok &= check("modern+Case: counted once -> 62014CJ0413",
+                _celexes(s) == ["62014CJ0413"])
 
     # --- FALSE-POSITIVE GUARDS: instruments are not cases -----------------
     ok &= check("Directive 71/305 is NOT a citation",

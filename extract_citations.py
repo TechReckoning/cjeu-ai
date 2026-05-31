@@ -28,18 +28,26 @@ import sys
 # Pure parsing logic (no DB) — unit-tested in test_extract_citations.py
 # --------------------------------------------------------------------------- #
 
-# A single case-number token, with optional registry letter:
-#   C- Court of Justice · T- General Court · F- Civil Service Tribunal · P- appeal
-_CASE_NUM = r'(?:C-|T-|F-|P-)?\d{1,4}/\d{2,4}'
+# Hyphen class: ASCII plus the Unicode hyphens/minus the Court uses in case
+# numbers (e.g. "C‑410/13" with a non-breaking hyphen U+2011).
+_H = r'[-‐‑‒–−]'
+_REG = r'(?:C|T|F|P)'   # C Court of Justice · T General Court · F Civil Service · P appeal
 
-# Full citation construct: the literal word Case/Cases/Joined Cases (this is what
-# disambiguates a case number from "Directive 71/305" / "Regulation No 1408/71")
-# followed by one or more case-number tokens joined by ',', 'and', or 'to'.
+# A single case-number token, with optional registry letter.
+_CASE_NUM = r'(?:' + _REG + _H + r')?\d{1,4}/\d{2,4}'
+
+# OLD-style construct: the literal word Case/Cases/Joined Cases (disambiguates a
+# bare number from "Directive 71/305" / "Regulation No 1408/71") + token list.
 CITATION_RE = re.compile(
     r'(?P<kw>Joined Cases|Cases|Case)\s+'
     r'(?P<nums>' + _CASE_NUM + r'(?:\s*(?:,|and|to)\s*' + _CASE_NUM + r')*)'
 )
-TOKEN_RE = re.compile(r'(?P<reg>C-|T-|F-|P-)?(?P<num>\d{1,4})/(?P<yr>\d{2,4})')
+# MODERN-style: a registry-LETTERED token ("C‑222/08") not necessarily preceded
+# by "Case" — common post-2012 (ECR discontinued) where cites read
+# "Party, C‑202/97, EU:C:2000:75, paragraph 51". The required letter prefix is
+# what keeps Directive/Regulation numbers from matching.
+MODERN_RE = re.compile(r'(?<![A-Za-z])(?P<reg>' + _REG + r')' + _H + r'(?P<num>\d{1,4})/(?P<yr>\d{2,4})')
+TOKEN_RE = re.compile(r'(?:(?P<reg>' + _REG + r')' + _H + r')?(?P<num>\d{1,4})/(?P<yr>\d{2,4})')
 PARA_RE = re.compile(r'\bparagraphs?\s+(\d+)', re.IGNORECASE)
 
 # Relation cues, checked most-specific first. Each entry: (relation_type, [phrases]).
@@ -72,7 +80,7 @@ def candidate_celex(reg, num, yr):
         year = 1900 + yr if yr >= 53 else 2000 + yr
     else:
         year = yr
-    descriptor = "TJ" if reg == "T-" else ("FJ" if reg == "F-" else "CJ")
+    descriptor = "TJ" if reg == "T" else ("FJ" if reg == "F" else "CJ")
     return f"6{year:04d}{descriptor}{int(num):04d}"
 
 
@@ -86,13 +94,24 @@ def detect_relation_type(text, kw_start):
     return "cites", None
 
 
+def _pinpoint(text, start):
+    pm = PARA_RE.search(text[start:min(len(text), start + 160)])
+    return int(pm.group(1)) if pm else None
+
+
 def parse_citations(text):
     """
     Parse all case citations in a paragraph. Returns a list of dicts with:
       candidate_celex, cited_paragraph_number, relation_type, signal_phrase,
       raw_reference. No DB access — cited_celex resolution happens in main().
+
+    Two passes: OLD-style ("Case C-57/94 ... [1995] ECR ...") and MODERN-style
+    (a registry-lettered token "C‑202/97" without a "Case" keyword). Modern tokens
+    that fall inside an old-style match are skipped to avoid double-counting.
     """
     out = []
+    covered = []   # char spans consumed by old-style matches
+
     for m in CITATION_RE.finditer(text):
         relation, signal = detect_relation_type(text, m.start())
         base = m.start("nums")
@@ -102,15 +121,28 @@ def parse_citations(text):
             tok_abs_end = base + tok.end()
             seg_end = (base + tokens[i + 1].start()) if i + 1 < len(tokens) \
                 else min(len(text), tok_abs_end + 160)
-            segment = text[tok_abs_end:seg_end]
-            pm = PARA_RE.search(segment)
             out.append({
                 "candidate_celex": celex,
-                "cited_paragraph_number": int(pm.group(1)) if pm else None,
+                "cited_paragraph_number": _pinpoint(text, tok_abs_end),
                 "relation_type": relation,
                 "signal_phrase": signal,
                 "raw_reference": text[m.start():seg_end].strip()[:300],
             })
+        covered.append((m.start(), m.end()))
+
+    for tok in MODERN_RE.finditer(text):
+        s = tok.start()
+        if any(a <= s < b for a, b in covered):
+            continue
+        relation, signal = detect_relation_type(text, s)
+        celex = candidate_celex(tok.group("reg"), tok.group("num"), tok.group("yr"))
+        out.append({
+            "candidate_celex": celex,
+            "cited_paragraph_number": _pinpoint(text, tok.end()),
+            "relation_type": relation,
+            "signal_phrase": signal,
+            "raw_reference": text[s:min(len(text), tok.end() + 160)].strip()[:300],
+        })
     return out
 
 
@@ -156,78 +188,28 @@ def main():
     conninfo, target = _build_conninfo()
     print(f"Target database: {target}" + ("  (DRY RUN — no writes)" if dry_run else ""))
 
-    # Two connections: read_conn streams the paginated scan, write_conn does
-    # lookups + writes. Interleaving two cursors on ONE connection deadlocks over
-    # the Supabase pooler, so they must be separate. Keyset pagination with a
-    # regular cursor (not a server-side named cursor, which also hung over the
-    # pooler) means there is no open server-side portal, so commits on write_conn
-    # never invalidate the scan.
-    read_conn = psycopg.connect(conninfo)
-    write_conn = psycopg.connect(conninfo)
+    # Connections to the Supabase pooler are used ONE AT A TIME and never
+    # interleaved (two concurrent pooler sessions from one client hang). The scan
+    # is single-connection, read-only, keyset-paginated; resolution is a pure
+    # in-memory set lookup (no per-batch query); writes happen only afterwards on
+    # a fresh connection. prepare_threshold=None avoids psycopg auto-preparing
+    # repeated statements, which the pooler dislikes.
+    CHUNK = 2000
+
+    # --- preload known CELEXes for in-memory resolution ----------------------
+    read_conn = psycopg.connect(conninfo, prepare_threshold=None)
+    read_conn.autocommit = True
     read_cur = read_conn.cursor()
-    write_cur = write_conn.cursor()
+    print("Loading known CELEXes...", flush=True)
+    read_cur.execute("SELECT DISTINCT celex FROM cjeu_paragraphs;")
+    known = {r[0] for r in read_cur.fetchall()}
+    print(f"  known decisions: {len(known)}", flush=True)
 
-    if not dry_run:
-        write_cur.execute("DELETE FROM citation_mentions WHERE source = 'text';")
-        write_conn.commit()
-        print("Cleared previous text mentions (full rebuild).")
-
-    resolved_cache = {}   # candidate_celex -> bool exists-in-corpus
-
-    def resolve(celexes):
-        unknown = [c for c in celexes if c not in resolved_cache]
-        if unknown:
-            write_cur.execute(
-                "SELECT celex FROM cjeu_paragraphs WHERE celex = ANY(%s);", (unknown,)
-            )
-            present = {r[0] for r in write_cur.fetchall()}
-            for c in unknown:
-                resolved_cache[c] = c in present
-        return resolved_cache
-
+    # --- scan + parse + resolve, accumulating mention rows in memory ---------
     stats = {"paragraphs": 0, "citations": 0, "resolved": 0, "unresolved": 0,
              "self": 0, "by_type": {}}
-    pending = []
-    BATCH = 500
-    CHUNK = 2000   # rows fetched per keyset page
-
-    def flush(pending):
-        if not pending:
-            return
-        cands = {p["candidate_celex"] for p in pending}
-        cache = resolve(list(cands))
-        for p in pending:
-            celex = p["candidate_celex"]
-            exists = cache.get(celex, False)
-            if exists and celex == p["citing_celex"]:
-                stats["self"] += 1
-                continue
-            cited = celex if exists else None
-            if cited:
-                stats["resolved"] += 1
-            else:
-                stats["unresolved"] += 1
-            stats["by_type"][p["relation_type"]] = stats["by_type"].get(p["relation_type"], 0) + 1
-            if not dry_run:
-                write_cur.execute(
-                    """
-                    INSERT INTO citation_mentions (
-                        citing_celex, citing_paragraph_number, cited_celex,
-                        cited_paragraph_number, relation_type, signal_phrase,
-                        raw_reference, source, confidence
-                    ) VALUES (%s,%s,%s,%s,%s,%s,%s,'text',%s);
-                    """,
-                    (
-                        p["citing_celex"], p["citing_paragraph_number"], cited,
-                        p["cited_paragraph_number"], p["relation_type"],
-                        p["signal_phrase"], p["raw_reference"],
-                        score_confidence(bool(cited), p["cited_paragraph_number"] is not None,
-                                         p["relation_type"] != "cites"),
-                    ),
-                )
-        if not dry_run:
-            write_conn.commit()
-
+    mentions = []   # tuples ready for INSERT (citing, citing_pn, cited, cited_pn,
+                    #                          relation, signal, raw, confidence)
     last_id = ""
     remaining = limit
     while remaining is None or remaining > 0:
@@ -242,15 +224,24 @@ def main():
             break
         for row_id, celex, paragraph_number, text in batch:
             stats["paragraphs"] += 1
-            if text:
-                for c in parse_citations(text):
-                    stats["citations"] += 1
-                    c["citing_celex"] = celex
-                    c["citing_paragraph_number"] = paragraph_number
-                    pending.append(c)
-            if len(pending) >= BATCH:
-                flush(pending)
-                pending = []
+            if not text:
+                continue
+            for c in parse_citations(text):
+                stats["citations"] += 1
+                cand = c["candidate_celex"]
+                exists = cand in known
+                if exists and cand == celex:
+                    stats["self"] += 1
+                    continue
+                cited = cand if exists else None
+                stats["resolved" if cited else "unresolved"] += 1
+                stats["by_type"][c["relation_type"]] = stats["by_type"].get(c["relation_type"], 0) + 1
+                mentions.append((
+                    celex, paragraph_number, cited, c["cited_paragraph_number"],
+                    c["relation_type"], c["signal_phrase"], c["raw_reference"],
+                    score_confidence(bool(cited), c["cited_paragraph_number"] is not None,
+                                     c["relation_type"] != "cites"),
+                ))
         last_id = batch[-1][0]
         if remaining is not None:
             remaining -= len(batch)
@@ -260,26 +251,8 @@ def main():
                   flush=True)
         if len(batch) < n:
             break
-    flush(pending)
-
-    if not dry_run:
-        print("Rebuilding citation_edges from resolved mentions...")
-        write_cur.execute("TRUNCATE citation_edges;")
-        write_cur.execute(
-            """
-            INSERT INTO citation_edges (citing_celex, cited_celex, mention_count,
-                                        dominant_relation_type, from_text)
-            SELECT citing_celex, cited_celex, count(*) AS mention_count,
-                   mode() WITHIN GROUP (ORDER BY relation_type) AS dominant_relation_type,
-                   true
-            FROM citation_mentions
-            WHERE source = 'text' AND cited_celex IS NOT NULL
-            GROUP BY citing_celex, cited_celex;
-            """
-        )
-        write_conn.commit()
-        write_cur.execute("SELECT count(*) FROM citation_edges;")
-        print(f"citation_edges rows: {write_cur.fetchone()[0]}")
+    read_cur.close()
+    read_conn.close()
 
     print("\n=== Extraction stats ===")
     print(f"  paragraphs scanned : {stats['paragraphs']}")
@@ -291,9 +264,47 @@ def main():
     if stats["citations"]:
         print(f"  resolution rate    : {stats['resolved'] / stats['citations']:.1%}")
 
-    read_cur.close()
+    if dry_run:
+        print(f"\nDRY RUN — would write {len(mentions)} mention rows. Nothing written.")
+        return
+
+    # --- write phase: fresh connection, opened only after the scan is done ---
+    print(f"\nWriting {len(mentions)} mentions...", flush=True)
+    write_conn = psycopg.connect(conninfo, prepare_threshold=None)
+    write_cur = write_conn.cursor()
+    write_cur.execute("DELETE FROM citation_mentions WHERE source = 'text';")
+    write_conn.commit()
+    insert_sql = (
+        "INSERT INTO citation_mentions ("
+        "citing_celex, citing_paragraph_number, cited_celex, cited_paragraph_number, "
+        "relation_type, signal_phrase, raw_reference, source, confidence) "
+        "VALUES (%s,%s,%s,%s,%s,%s,%s,'text',%s)"
+    )
+    WBATCH = 1000
+    for i in range(0, len(mentions), WBATCH):
+        write_cur.executemany(insert_sql, mentions[i:i + WBATCH])
+        write_conn.commit()
+        if i % 20000 == 0:
+            print(f"  wrote {min(i + WBATCH, len(mentions))}/{len(mentions)}", flush=True)
+
+    print("Rebuilding citation_edges...", flush=True)
+    write_cur.execute("TRUNCATE citation_edges;")
+    write_cur.execute(
+        """
+        INSERT INTO citation_edges (citing_celex, cited_celex, mention_count,
+                                    dominant_relation_type, from_text)
+        SELECT citing_celex, cited_celex, count(*) AS mention_count,
+               mode() WITHIN GROUP (ORDER BY relation_type) AS dominant_relation_type,
+               true
+        FROM citation_mentions
+        WHERE source = 'text' AND cited_celex IS NOT NULL
+        GROUP BY citing_celex, cited_celex;
+        """
+    )
+    write_conn.commit()
+    write_cur.execute("SELECT count(*) FROM citation_edges;")
+    print(f"citation_edges rows: {write_cur.fetchone()[0]}")
     write_cur.close()
-    read_conn.close()
     write_conn.close()
 
 
