@@ -640,6 +640,87 @@ Sources:
                     st.write(f"Citation authority: cited by {item['citation_in_degree']} decisions")
                 st.write(item["text"])
 
+        # ----------------------------------------------------------------- #
+        # Doctrinal context (citation-graph derived; NOT part of the grounded
+        # answer). Deterministic: no LLM, so no hallucination risk. Surfaces
+        # foundational authorities the sources rely on + later "distinguishing"
+        # treatment. Degrades to nothing if the graph is unavailable.
+        # ----------------------------------------------------------------- #
+        try:
+            # Foundational authorities describe the TOPIC, so compute them from
+            # the broader retrieved pool (rerank candidates), not just the final
+            # few shown sources — a wider citing set surfaces the doctrinal roots
+            # the topic's case law relies on. Later-treatment targets still
+            # include the shown sources.
+            pool_celexes = list({item["celex"] for item in rerank_candidates})
+            shown_celexes = list({item["celex"] for item in top_results})
+            foundational = []
+            distinguished = []
+            if pool_celexes:
+                with db() as conn:
+                    with conn.cursor() as cur:
+                        cur.execute(
+                            """
+                            SELECT e.cited_celex,
+                                   count(DISTINCT e.citing_celex) AS support,
+                                   m.in_degree
+                            FROM citation_edges e
+                            JOIN decision_metrics m ON m.celex = e.cited_celex
+                            WHERE e.citing_celex = ANY(%s)
+                              AND e.cited_celex <> ALL(%s)
+                            GROUP BY e.cited_celex, m.in_degree
+                            HAVING count(DISTINCT e.citing_celex) >= 2
+                            ORDER BY support DESC, m.in_degree DESC NULLS LAST
+                            LIMIT 5;
+                            """,
+                            (pool_celexes, pool_celexes),
+                        )
+                        foundational = cur.fetchall()
+
+                        targets = shown_celexes + [row[0] for row in foundational]
+                        cur.execute(
+                            """
+                            SELECT cited_celex, count(*) AS n
+                            FROM citation_edges
+                            WHERE cited_celex = ANY(%s)
+                              AND dominant_relation_type = 'distinguishing'
+                            GROUP BY cited_celex
+                            ORDER BY n DESC;
+                            """,
+                            (targets,),
+                        )
+                        distinguished = cur.fetchall()
+
+            if foundational or distinguished:
+                st.subheader("Doctrinal context")
+                st.caption(
+                    "Derived from the CJEU citation graph — navigational context, "
+                    "not part of the cited answer above."
+                )
+                if foundational:
+                    st.markdown("**Foundational authorities for this topic**")
+                    for celex, _support, in_degree in foundational:
+                        url = (
+                            "https://eur-lex.europa.eu/legal-content/EN/TXT/"
+                            f"?uri=CELEX:{celex}"
+                        )
+                        st.markdown(
+                            f"- [{celex}]({url}) — cited by {in_degree or 0} decisions"
+                        )
+                if distinguished:
+                    st.markdown("**Later treatment**")
+                    for celex, n in distinguished:
+                        url = (
+                            "https://eur-lex.europa.eu/legal-content/EN/TXT/"
+                            f"?uri=CELEX:{celex}"
+                        )
+                        st.markdown(
+                            f"- ⚠️ [{celex}]({url}) has been distinguished "
+                            f"by {n} later decision(s)"
+                        )
+        except Exception as doctrinal_err:
+            print("Doctrinal context unavailable:", doctrinal_err)
+
 # --------------------------------------------------------------------------- #
 # Feedback
 # --------------------------------------------------------------------------- #
