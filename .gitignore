@@ -3,6 +3,9 @@
 __pycache__/
 *.log
 *.sql
+# ...but DO track reviewable migrations (CLAUDE.md: prefer .sql migrations)
+!migrations/
+!migrations/*.sql
 
 # local vector databases / generated data
 chroma_db/

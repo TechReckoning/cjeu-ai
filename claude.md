@@ -23,13 +23,30 @@ dedicated cleanup commit, but never as a side effect of another task.
 The repo is mid-migration from ChromaDB to pgvector. pgvector is the target;
 ChromaDB code is legacy.
 
+## Ingestion architecture (IMPORTANT — has a gap)
+Ingestion runs against a **local** Postgres (`dbname=cjeu_ai host=localhost`), NOT
+Supabase: `incremental_index_pgvector.py`, `migrate_to_pgvector.py`, and
+`coverage_report.py` all hardcode that local connection. The shell scripts
+(`daily_update*.sh`, `*backfill*.sh`) pull from CELLAR via the `cjeu-py` CLI, then
+index into the local DB.
+
+The local -> **Supabase** (production, what `app.py` reads) push is
+`incremental_index_supabase.py`, invoked only by `daily_update_recent.sh` STEP 4 —
+but that file is **missing from the repo**. So production Supabase updates are NOT
+reproducible from version control, and the corpus is not reliably "auto-updating"
+until this is fixed. Two options: (a) recover and commit the missing script, or
+(b) parameterise the indexer to write straight to Supabase via the app's env vars,
+dropping the local two-step entirely.
+
 ## Database schema (Supabase, public schema)
-**`cjeu_paragraphs`** (~601k rows, ~10 GB; embedding-dominated):
+**`cjeu_paragraphs`** (~608k paragraph rows across ~13,954 decisions, ~10 GB; embedding-dominated):
 `id` (text, PK) · `celex` (text) · `url` (text) · `language` (text) ·
 `paragraph_number` (int) · `paragraph_index` (int) · `text` (text) ·
 `embedding` (vector, 1536-dim, text-embedding-3-small) · `search_vector` (tsvector).
 Indexes: HNSW `cjeu_embedding_idx (embedding vector_cosine_ops)`,
-GIN `cjeu_search_idx (search_vector)`. No index on `language` or `celex` yet.
+GIN `cjeu_search_idx (search_vector)`. No `celex` index yet — a
+`CREATE INDEX CONCURRENTLY` migration is provided in `migrations/` pending apply.
+A `language` index is intentionally NOT needed (single-language corpus; see below).
 
 **`amicus_queries`** (analytics + feedback): `id` · `created_at` · `user_question`
 · `retrieval_question` · `response_time_seconds` · `input/output/total_tokens` ·
@@ -60,12 +77,12 @@ and accumulating honest data (including failures).
 - Answer model upgraded mini -> gpt-4.1.
 - Config constants centralised at top of app.py (models, FTS_CONFIG, K_RRF, etc.).
 
-## OPEN DECISION — full-text search language
-`FTS_CONFIG` is currently `"english"`. The corpus has a `language` column and may
-be multilingual (French is the Court's working language). Pending the language
-distribution: if overwhelmingly English, leave as-is; if multilingual, route each
-query to a per-language config (and add a `language` filter + supporting index),
-or move to a neutral config. Do NOT silently change this without the data.
+## RESOLVED — full-text search language
+The corpus is **English-only by design**. A `GROUP BY language` over
+`cjeu_paragraphs` returns a single row: `eng` (607,999 paragraphs / 13,954
+decisions, as of 2026-05-31). `FTS_CONFIG` stays `"english"` — this is settled,
+not provisional. Do NOT add per-language routing or a `language` index (the column
+is single-valued). The maintainer does not want non-English case law ingested.
 
 ## Roadmap (next major feature)
 **Citation graph** of CJEU decisions, to surface doctrinal evolution and improve
