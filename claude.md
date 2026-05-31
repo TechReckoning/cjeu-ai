@@ -46,9 +46,9 @@ script `incremental_index_supabase.py` is obsolete and no longer referenced.
 `paragraph_number` (int) · `paragraph_index` (int) · `text` (text) ·
 `embedding` (vector, 1536-dim, text-embedding-3-small) · `search_vector` (tsvector).
 Indexes: HNSW `cjeu_embedding_idx (embedding vector_cosine_ops)`,
-GIN `cjeu_search_idx (search_vector)`. No `celex` index yet — a
-`CREATE INDEX CONCURRENTLY` migration is provided in `migrations/` pending apply.
-A `language` index is intentionally NOT needed (single-language corpus; see below).
+GIN `cjeu_search_idx (search_vector)`, btree `cjeu_celex_idx (celex)` (applied via
+`migrations/0001`). A `language` index is intentionally NOT needed (single-language
+corpus; see below).
 
 **`amicus_queries`** (analytics + feedback): `id` · `created_at` · `user_question`
 · `retrieval_question` · `response_time_seconds` · `input/output/total_tokens` ·
@@ -57,14 +57,28 @@ A `language` index is intentionally NOT needed (single-language corpus; see belo
 data for any learning-to-rank/fine-tuning yet. Priority is clean instrumentation
 and accumulating honest data (including failures).
 
+**Citation-graph tables** (populated; side tables — never widen `cjeu_paragraphs`):
+- **`citation_mentions`** (~121k) — one row per text-parsed citation occurrence:
+  `citing_celex` · `citing_paragraph_number` · `cited_celex` (NULL if unresolved) ·
+  `cited_paragraph_number` · `relation_type` (cites/see/following/by_analogy/distinguishing)
+  · `signal_phrase` · `raw_reference` · `source` ('text'|'cellar') · `confidence`.
+- **`citation_edges`** (~54k) — deduplicated decision→decision edges (networkx input):
+  `citing_celex` · `cited_celex` · `mention_count` · `dominant_relation_type` ·
+  `from_text` · `from_cellar`.
+- **`decision_metrics`** (~10.7k) — offline networkx scores per decision:
+  `in_degree` · `out_degree` · `pagerank` · `authority` · `hub` · `community_id`.
+  Joined at query time for the ranking tie-breaker.
+
 ## Pipeline (in app.py)
 1. Rewrite latest message into a standalone question (gpt-4.1-mini).
 2. Embed (text-embedding-3-small).
 3. Hybrid retrieval: vector query + keyword query, fused with **Reciprocal Rank
    Fusion (RRF, k=60)** — NOT raw-score weighting.
 4. LLM rerank top ~50 (gpt-4.1-mini), with fallback to RRF order on failure.
-5. Answer (gpt-4.1) using ONLY retrieved sources, with CELEX/paragraph citations.
-6. Log to `amicus_queries` (successes AND failures); 👍/👎 feedback.
+5. Tie-break equal rerank scores by citation authority (`decision_metrics.pagerank`):
+   legal relevance always wins, `hybrid_score` is the final fallback.
+6. Answer (gpt-4.1) using ONLY retrieved sources, with CELEX/paragraph citations.
+7. Log to `amicus_queries` (successes AND failures); 👍/👎 feedback.
 
 ## Changes already applied (do not regress)
 - RRF fusion replaced incommensurable score-weighting (cosine vs ts_rank_cd).
@@ -86,18 +100,36 @@ decisions, as of 2026-05-31). `FTS_CONFIG` stays `"english"` — this is settled
 not provisional. Do NOT add per-language routing or a `language` index (the column
 is single-valued). The maintainer does not want non-English case law ingested.
 
-## Roadmap (next major feature)
-**Citation graph** of CJEU decisions, to surface doctrinal evolution and improve
-answer reliability. Design constraints:
-- Store edges in **separate tables**, NOT by widening `cjeu_paragraphs` (hot table).
-- Two edge sources: CELLAR CDM citation metadata (clean skeleton) + citations
-  parsed from judgment text (paragraph-precise, the valuable part).
-- Make edges **typed/signed** (following / by analogy / distinguishing /
-  consolidating) by detecting the Court's stereotyped phrasing.
-- Compute graph metrics (authority/PageRank, communities) offline in batch with
-  `networkx`; write scores back as columns. Stay in Postgres (recursive CTEs) at
-  this scale; only consider a graph DB if interactive multi-hop becomes core.
-- Ingestion must fan out idempotently: embeddings + citation edges + metric recompute.
+## Citation graph (Phase 1 + 3 LIVE; Phase 2 next)
+Goal: surface doctrinal evolution and improve answer reliability. Design (followed):
+edges in separate tables (above), two sources (CELLAR metadata + text-parsed),
+typed/signed edges from the Court's stereotyped phrasing, networkx metrics offline.
+
+DONE:
+- **Phase 1** — `extract_citations.py` parses both OLD-style ("Case C-57/94 …
+  [1995] ECR …") and MODERN ECLI-era citations ("Party, C‑202/97, EU:C:2000:75,
+  paragraph 51"; handles non-breaking hyphens, no "Case" keyword), resolves each
+  to a CELEX verified against the corpus, types it, and writes `citation_mentions`
+  + `citation_edges`. Re-runnable full rebuild; pure parser is unit-tested
+  (`test_extract_citations.py`, 26 assertions). ~60% resolve — the unresolved are
+  mostly General Court `T‑` cases / orders, which the CJ-only corpus doesn't hold.
+- **Phase 3** — `compute_citation_metrics.py` loads `citation_edges` into networkx
+  and writes `decision_metrics` (weighted PageRank, HITS, Louvain communities).
+  `app.py` uses `pagerank` as a PURE tie-breaker among equal rerank scores
+  (relevance always wins) and shows "cited by N decisions" per source. Top-PageRank
+  nodes are the EU-law canon (Marshall, Dassonville, Bosman, Francovich) — a good
+  sanity check. Needs `networkx` + `scipy` (in requirements).
+
+TODO:
+- **Phase 2** — enable CELLAR citations (drop `--skip-citations` in the shell
+  scripts) to add the authoritative CELEX→CELEX skeleton (`source='cellar'`),
+  confirm text edges, and resolve many of the ~46k unresolved.
+- **Recompute fan-out** — run `extract_citations.py` + `compute_citation_metrics.py`
+  after each ingestion so the graph stays current (idempotent full rebuild).
+- **Answer enrichment** — feed "later cases that *distinguish* this one" into the
+  answer for a "still good law?" signal.
+- Stay in Postgres (recursive CTEs) at this scale; only consider a graph DB if
+  interactive multi-hop becomes core.
 
 ## Database safety rules (IMPORTANT)
 - Production Supabase holds ~10 GB. Treat it as production.
