@@ -31,11 +31,8 @@ echo ""
 
 cjeu-py fetch-texts --max-items 10000
 
-echo "STEP 3 — Incremental local indexing..."
+echo "STEP 3 — Incremental indexing to Supabase..."
 python incremental_index_pgvector.py
-
-echo "STEP 4 — Incremental Supabase indexing..."
-python incremental_index_supabase.py
 
 echo "========================================="
 echo "Recent update completed"

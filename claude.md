@@ -23,20 +23,22 @@ dedicated cleanup commit, but never as a side effect of another task.
 The repo is mid-migration from ChromaDB to pgvector. pgvector is the target;
 ChromaDB code is legacy.
 
-## Ingestion architecture (IMPORTANT — has a gap)
-Ingestion runs against a **local** Postgres (`dbname=cjeu_ai host=localhost`), NOT
-Supabase: `incremental_index_pgvector.py`, `migrate_to_pgvector.py`, and
-`coverage_report.py` all hardcode that local connection. The shell scripts
-(`daily_update*.sh`, `*backfill*.sh`) pull from CELLAR via the `cjeu-py` CLI, then
-index into the local DB.
+## Ingestion architecture
+`incremental_index_pgvector.py` embeds new paragraphs from the `cjeu-py` JSONL
+output and writes them **straight to Supabase** (production), using the same
+`DATABASE_URL` / `SUPABASE_*` env vars as `app.py`. There is one target DB — the
+old local `cjeu_ai` staging step is gone. Run with `--dry-run` to preview counts
+without writing. The shell scripts (`daily_update*.sh`, `*backfill*.sh`) pull from
+CELLAR via `cjeu-py`, then call that indexer.
 
-The local -> **Supabase** (production, what `app.py` reads) push is
-`incremental_index_supabase.py`, invoked only by `daily_update_recent.sh` STEP 4 —
-but that file is **missing from the repo**. So production Supabase updates are NOT
-reproducible from version control, and the corpus is not reliably "auto-updating"
-until this is fixed. Two options: (a) recover and commit the missing script, or
-(b) parameterise the indexer to write straight to Supabase via the app's env vars,
-dropping the local two-step entirely.
+Schema and indexes are NOT touched by the indexer — they are managed via
+`migrations/`; new rows are indexed automatically by the existing HNSW/GIN indexes
+on INSERT.
+
+Still local-only / legacy (target a local `cjeu_ai` Postgres; NOT production):
+`migrate_to_pgvector.py` (one-off ChromaDB -> pgvector migration), `coverage_report.py`,
+`build_index.py`, `build_paragraph_index.py`. The former local -> Supabase push
+script `incremental_index_supabase.py` is obsolete and no longer referenced.
 
 ## Database schema (Supabase, public schema)
 **`cjeu_paragraphs`** (~608k paragraph rows across ~13,954 decisions, ~10 GB; embedding-dominated):
