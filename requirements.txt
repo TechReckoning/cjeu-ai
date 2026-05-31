@@ -69,6 +69,7 @@ propcache==0.5.2
 protobuf==6.33.6
 psycopg==3.3.4
 psycopg-binary==3.3.4
+psycopg-pool==3.2.4
 pyarrow==24.0.0
 pybase64==1.4.3
 pydantic==2.13.4

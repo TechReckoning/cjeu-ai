@@ -1,21 +1,119 @@
+"""
+AMICUS — Streamlit app (improved)
+
+This is a drop-in replacement for app.py. UI text, prompts, models for the
+rewrite/rerank steps, and the overall flow are preserved. The changes are:
+
+1.  RRF FUSION  — hybrid_score now uses Reciprocal Rank Fusion (rank-based,
+    scale-invariant) instead of adding cosine similarity and ts_rank_cd, which
+    live on incommensurable scales. See FUSION section.
+2.  websearch_to_tsquery instead of plainto_tsquery — plainto_tsquery ANDs every
+    term, so long natural-language questions usually returned 0 keyword rows.
+3.  FTS_CONFIG constant — currently 'english'. If the corpus is multilingual,
+    switch this (or go per-language). Isolated here so it's a one-line change.
+4.  CONNECTION POOLING — a single cached psycopg_pool.ConnectionPool is reused
+    across reruns/sessions instead of opening a new connection every time.
+    Falls back to the original per-call connect if psycopg_pool isn't installed.
+    -> add `psycopg-pool` to requirements.txt to enable pooling.
+5.  RERANKER FALLBACK — if the rerank model errors or returns invalid JSON, we
+    fall back to the RRF order instead of killing the request with st.stop().
+6.  ANALYTICS INTEGRITY — response_time_seconds and error_message are now written;
+    retrieval_success reflects reality; FAILED queries are logged too (previously
+    failures were never recorded, biasing the analytics).
+7.  LIVE CORPUS STATS — the "X decisions / Y paragraphs" line is queried live
+    (cached) instead of hardcoded, so it self-updates as ingestion runs.
+8.  ANSWER_MODEL upgraded to gpt-4.1 for the reliability-critical answer step.
+    Revert to "gpt-4.1-mini" if you prefer the lower cost.
+"""
+
 import os
 import json
+import time
+from contextlib import contextmanager
+
 from dotenv import load_dotenv
 from openai import OpenAI
-
 import psycopg
 from pgvector.psycopg import register_vector
-
 import streamlit as st
 
 load_dotenv()
-
 client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
 st.set_page_config(page_title="AMICUS", layout="wide")
 
+# --------------------------------------------------------------------------- #
+# Configuration (centralised so tuning is a one-line change)
+# --------------------------------------------------------------------------- #
+EMBED_MODEL = "text-embedding-3-small"
+REWRITE_MODEL = "gpt-4.1-mini"
+RERANK_MODEL = "gpt-4.1-mini"
+ANSWER_MODEL = "gpt-4.1"          # [IMPROVED] upgraded from mini for the final answer
+FTS_CONFIG = "english"           # [PENDING] switch if the corpus is multilingual
+K_RRF = 60                       # standard RRF damping constant
+RERANK_POOL = 50                 # how many fused candidates to send to the reranker
+HNSW_EF_SEARCH = 100             # recall/latency knob for the HNSW vector index
+
+
+# --------------------------------------------------------------------------- #
+# Database access — pooled, with graceful fallback to the original behaviour
+# --------------------------------------------------------------------------- #
+def _build_conninfo():
+    """Resolve a single connection string from secrets or environment."""
+    try:
+        return st.secrets["DATABASE_URL"]
+    except Exception:
+        pass
+    url = os.getenv("DATABASE_URL")
+    if url:
+        return url
+    host = os.getenv("SUPABASE_HOST")
+    port = os.getenv("SUPABASE_PORT")
+    dbname = os.getenv("SUPABASE_DBNAME")
+    user = os.getenv("SUPABASE_USER")
+    password = os.getenv("SUPABASE_PASSWORD")
+    if host and dbname and user:
+        return (
+            f"host={host} port={port} dbname={dbname} "
+            f"user={user} password={password} sslmode=require"
+        )
+    return None
+
+
+@st.cache_resource
+def get_pool():
+    """
+    A process-wide connection pool, created once and reused. Each new physical
+    connection gets the pgvector type adapter registered via `configure`.
+    Returns None if psycopg_pool isn't available, so the app still runs.
+    """
+    try:
+        from psycopg_pool import ConnectionPool
+    except Exception:
+        return None
+    conninfo = _build_conninfo()
+    if not conninfo:
+        return None
+
+    def _configure(conn):
+        register_vector(conn)
+
+    try:
+        pool = ConnectionPool(
+            conninfo,
+            min_size=1,
+            max_size=8,           # keep well under Supabase connection limits
+            max_idle=300,
+            configure=_configure,
+            open=True,
+        )
+        return pool
+    except Exception:
+        return None
+
 
 def get_db_connection():
+    """Legacy per-call connection (fallback path when pooling is unavailable)."""
     try:
         database_url = st.secrets["DATABASE_URL"]
         conn = psycopg.connect(database_url)
@@ -28,23 +126,113 @@ def get_db_connection():
             password=os.getenv("SUPABASE_PASSWORD"),
             sslmode="require",
         )
-
     register_vector(conn)
     return conn
 
 
+@contextmanager
+def db():
+    """
+    Yield a DB connection. Uses the pool when available (auto-returned and
+    committed on clean exit); otherwise opens and closes a direct connection.
+    """
+    pool = get_pool()
+    if pool is not None:
+        with pool.connection() as conn:
+            yield conn
+    else:
+        conn = get_db_connection()
+        try:
+            yield conn
+            conn.commit()
+        finally:
+            conn.close()
+
+
+@st.cache_data(ttl=3600)
+def get_corpus_stats():
+    """Live corpus counts, cached for an hour so the UI figures stay truthful."""
+    try:
+        with db() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT count(*) AS paragraphs, "
+                    "count(DISTINCT celex) AS decisions FROM cjeu_paragraphs;"
+                )
+                paragraphs, decisions = cur.fetchone()
+        return decisions, paragraphs
+    except Exception:
+        return None, None
+
+
+def log_query(
+    user_question,
+    retrieval_question,
+    usage,
+    candidate_count,
+    source_count,
+    retrieval_success,
+    answer_length,
+    response_time_seconds,
+    error_message,
+):
+    """Insert one analytics row. Logs both successes AND failures."""
+    try:
+        input_tokens = getattr(usage, "input_tokens", None) if usage else None
+        output_tokens = getattr(usage, "output_tokens", None) if usage else None
+        total_tokens = getattr(usage, "total_tokens", None) if usage else None
+        with db() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    INSERT INTO amicus_queries (
+                        user_question,
+                        retrieval_question,
+                        response_time_seconds,
+                        input_tokens,
+                        output_tokens,
+                        total_tokens,
+                        candidate_count,
+                        source_count,
+                        retrieval_success,
+                        answer_length,
+                        error_message
+                    )
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    RETURNING id
+                    """,
+                    (
+                        user_question,
+                        retrieval_question,
+                        response_time_seconds,
+                        input_tokens,
+                        output_tokens,
+                        total_tokens,
+                        candidate_count,
+                        source_count,
+                        retrieval_success,
+                        answer_length,
+                        error_message,
+                    ),
+                )
+                return cur.fetchone()[0]
+    except Exception as e:
+        print("Analytics logging failed:", e)
+        return None
+
+
+# --------------------------------------------------------------------------- #
+# Sidebar
+# --------------------------------------------------------------------------- #
 with st.sidebar.expander("Data Sources & Disclaimer", expanded=False):
     st.markdown("""
 ### Data Source
-
 This application uses publicly available case law of the Court of Justice of the European Union (CJEU) obtained from the Publications Office of the European Union through the CELLAR repository.
 
 ### Independence and Non-Affiliation
-
 This application is an independent legal research tool developed and operated by a private entity. It is not affiliated with, endorsed by, sponsored by, or otherwise connected to the Court of Justice of the European Union, the Publications Office of the European Union, the European Commission, or any other institution, body, office, or agency of the European Union.
 
 ### Disclaimer
-
 This application uses artificial intelligence and automated retrieval technologies to assist with legal research. While reasonable efforts are made to ensure accuracy and relevance, the application may generate incomplete, inaccurate, outdated, or misleading information.
 
 The information provided by this application is for research and informational purposes only and does not constitute legal advice.
@@ -58,18 +246,22 @@ if st.sidebar.button("Clear Conversation"):
 
 st.title("AMICUS")
 st.subheader("Leave the Junior Alone. Ask Amicus.")
-
 st.caption(
     "Independent AI-powered legal research across Court of Justice of the European Union case law. "
     "Not affiliated with the CJEU or any EU institution. "
     "AI-generated results may contain errors and must be independently verified."
 )
-
 st.caption("Hybrid semantic + full-text search with GPT reranking over CJEU case-law")
 
-st.info(
-    "Amicus currently searches across 13,954 CJEU decisions and 607,999 indexed case-law paragraphs."
-)
+# [IMPROVED] live, self-updating corpus stats (was hardcoded)
+_decisions, _paragraphs = get_corpus_stats()
+if _decisions and _paragraphs:
+    st.info(
+        f"Amicus currently searches across {_decisions:,} CJEU decisions "
+        f"and {_paragraphs:,} indexed case-law paragraphs."
+    )
+else:
+    st.info("Amicus searches across CJEU case-law paragraphs.")
 
 final_limit = st.sidebar.slider("Final sources", 3, 12, 8)
 candidate_limit = st.sidebar.slider("Candidate pool per method", 20, 80, 40)
@@ -83,21 +275,35 @@ for message in st.session_state.messages:
 
 question = st.chat_input("Ask Amicus a legal research question...")
 
+# --------------------------------------------------------------------------- #
+# Main pipeline
+# --------------------------------------------------------------------------- #
 if question and question.strip():
     st.session_state.messages.append({"role": "user", "content": question})
-
     with st.chat_message("user"):
         st.markdown(question)
 
     recent_messages = st.session_state.messages[-10:]
-
     conversation_context = "\n".join(
         f"{msg['role'].upper()}: {msg['content']}"
         for msg in recent_messages
     )
 
-    with st.spinner("Understanding the follow-up question..."):
-        standalone_prompt = f"""
+    # State carried through to logging regardless of success/failure
+    t0 = time.perf_counter()
+    retrieval_question = question
+    rerank_candidates = []
+    top_results = []
+    assistant_answer = None
+    answer_usage = None
+    error_message = None
+
+    try:
+        # ----------------------------------------------------------------- #
+        # 1. Contextualise into a standalone question
+        # ----------------------------------------------------------------- #
+        with st.spinner("Understanding the follow-up question..."):
+            standalone_prompt = f"""
 You are assisting with EU law legal research.
 
 Rewrite the user's latest message into a standalone legal research question, using the recent conversation context if needed.
@@ -110,139 +316,127 @@ Latest user message:
 
 Return only the standalone question. No markdown.
 """
-
-        standalone_response = client.responses.create(
-            model="gpt-4.1-mini",
-            input=standalone_prompt
-        )
-
-        retrieval_question = standalone_response.output_text.strip()
-
-    with st.spinner("Running hybrid retrieval..."):
-        embedding_response = client.embeddings.create(
-            model="text-embedding-3-small",
-            input=[retrieval_question]
-        )
-
-        query_embedding = embedding_response.data[0].embedding
-
-        conn = get_db_connection()
-        results = {}
-
-        with conn.cursor() as cur:
-            cur.execute("""
-                SELECT
-                    id,
-                    celex,
-                    url,
-                    paragraph_number,
-                    paragraph_index,
-                    text,
-                    1 - (embedding <=> %s::vector) AS vector_score,
-                    0::float AS keyword_score
-                FROM cjeu_paragraphs
-                ORDER BY embedding <=> %s::vector
-                LIMIT %s;
-            """, (query_embedding, query_embedding, candidate_limit))
-
-            for row in cur.fetchall():
-                (
-                    row_id,
-                    celex,
-                    url,
-                    paragraph_number,
-                    paragraph_index,
-                    text,
-                    vector_score,
-                    keyword_score
-                ) = row
-
-                results[row_id] = {
-                    "id": row_id,
-                    "celex": celex,
-                    "url": url,
-                    "paragraph_number": paragraph_number,
-                    "paragraph_index": paragraph_index,
-                    "text": text,
-                    "vector_score": float(vector_score),
-                    "keyword_score": float(keyword_score),
-                    "retrieval_source": "vector"
-                }
-
-            cur.execute("""
-                SELECT
-                    id,
-                    celex,
-                    url,
-                    paragraph_number,
-                    paragraph_index,
-                    text,
-                    0::float AS vector_score,
-                    ts_rank_cd(search_vector, plainto_tsquery('english', %s)) AS keyword_score
-                FROM cjeu_paragraphs
-                WHERE search_vector @@ plainto_tsquery('english', %s)
-                ORDER BY keyword_score DESC
-                LIMIT %s;
-            """, (retrieval_question, retrieval_question, candidate_limit))
-
-            for row in cur.fetchall():
-                (
-                    row_id,
-                    celex,
-                    url,
-                    paragraph_number,
-                    paragraph_index,
-                    text,
-                    vector_score,
-                    keyword_score
-                ) = row
-
-                if row_id in results:
-                    results[row_id]["keyword_score"] = float(keyword_score)
-                    results[row_id]["retrieval_source"] = "both"
-                else:
-                    results[row_id] = {
-                        "id": row_id,
-                        "celex": celex,
-                        "url": url,
-                        "paragraph_number": paragraph_number,
-                        "paragraph_index": paragraph_index,
-                        "text": text,
-                        "vector_score": float(vector_score),
-                        "keyword_score": float(keyword_score),
-                        "retrieval_source": "keyword"
-                    }
-
-        conn.close()
-
-        candidates = list(results.values())
-
-        for item in candidates:
-            item["hybrid_score"] = (
-                item["vector_score"] * 0.7
-                + item["keyword_score"] * 0.3
+            standalone_response = client.responses.create(
+                model=REWRITE_MODEL,
+                input=standalone_prompt,
             )
+            retrieval_question = standalone_response.output_text.strip()
 
-        candidates.sort(key=lambda x: x["hybrid_score"], reverse=True)
-        rerank_candidates = candidates[:50]
+        # ----------------------------------------------------------------- #
+        # 2. Hybrid retrieval (vector + keyword), fused with RRF
+        # ----------------------------------------------------------------- #
+        with st.spinner("Running hybrid retrieval..."):
+            embedding_response = client.embeddings.create(
+                model=EMBED_MODEL,
+                input=[retrieval_question],
+            )
+            query_embedding = embedding_response.data[0].embedding
 
-    with st.spinner("Reranking legally relevant sources..."):
-        candidate_blocks = []
+            results = {}
+            with db() as conn:
+                with conn.cursor() as cur:
+                    # Vector arm — fetch order == vector rank
+                    cur.execute(f"SET LOCAL hnsw.ef_search = {int(HNSW_EF_SEARCH)};")
+                    cur.execute(
+                        """
+                        SELECT
+                            id, celex, url, paragraph_number, paragraph_index, text,
+                            1 - (embedding <=> %s::vector) AS vector_score,
+                            0::float AS keyword_score
+                        FROM cjeu_paragraphs
+                        ORDER BY embedding <=> %s::vector
+                        LIMIT %s;
+                        """,
+                        (query_embedding, query_embedding, candidate_limit),
+                    )
+                    for rank, row in enumerate(cur.fetchall(), start=1):
+                        (row_id, celex, url, paragraph_number,
+                         paragraph_index, text, vector_score, keyword_score) = row
+                        results[row_id] = {
+                            "id": row_id,
+                            "celex": celex,
+                            "url": url,
+                            "paragraph_number": paragraph_number,
+                            "paragraph_index": paragraph_index,
+                            "text": text,
+                            "vector_score": float(vector_score),
+                            "keyword_score": float(keyword_score),
+                            "vector_rank": rank,
+                            "keyword_rank": None,
+                            "retrieval_source": "vector",
+                        }
 
-        for i, item in enumerate(rerank_candidates, start=1):
-            candidate_blocks.append({
-                "id": i,
-                "celex": item["celex"],
-                "paragraph_number": item["paragraph_number"],
-                "paragraph_index": item["paragraph_index"],
-                "retrieval_source": item["retrieval_source"],
-                "vector_score": item["vector_score"],
-                "keyword_score": item["keyword_score"],
-                "hybrid_score": item["hybrid_score"],
-                "text": item["text"][:2000]
-            })
+                    # Keyword arm — fetch order == keyword rank
+                    # websearch_to_tsquery: supports OR/phrases (plainto AND-ed everything)
+                    cur.execute(
+                        """
+                        SELECT
+                            id, celex, url, paragraph_number, paragraph_index, text,
+                            0::float AS vector_score,
+                            ts_rank_cd(search_vector,
+                                       websearch_to_tsquery(%s::regconfig, %s)) AS keyword_score
+                        FROM cjeu_paragraphs
+                        WHERE search_vector @@ websearch_to_tsquery(%s::regconfig, %s)
+                        ORDER BY keyword_score DESC
+                        LIMIT %s;
+                        """,
+                        (FTS_CONFIG, retrieval_question,
+                         FTS_CONFIG, retrieval_question, candidate_limit),
+                    )
+                    for rank, row in enumerate(cur.fetchall(), start=1):
+                        (row_id, celex, url, paragraph_number,
+                         paragraph_index, text, vector_score, keyword_score) = row
+                        if row_id in results:
+                            results[row_id]["keyword_score"] = float(keyword_score)
+                            results[row_id]["keyword_rank"] = rank
+                            results[row_id]["retrieval_source"] = "both"
+                        else:
+                            results[row_id] = {
+                                "id": row_id,
+                                "celex": celex,
+                                "url": url,
+                                "paragraph_number": paragraph_number,
+                                "paragraph_index": paragraph_index,
+                                "text": text,
+                                "vector_score": float(vector_score),
+                                "keyword_score": float(keyword_score),
+                                "vector_rank": None,
+                                "keyword_rank": rank,
+                                "retrieval_source": "keyword",
+                            }
 
-        rerank_prompt = f"""
+            # ---- FUSION: Reciprocal Rank Fusion -------------------------- #
+            for item in results.values():
+                vr = item.get("vector_rank")
+                kr = item.get("keyword_rank")
+                item["hybrid_score"] = (
+                    (1.0 / (K_RRF + vr) if vr else 0.0)
+                    + (1.0 / (K_RRF + kr) if kr else 0.0)
+                )
+
+            candidates = list(results.values())
+            candidates.sort(key=lambda x: x["hybrid_score"], reverse=True)
+            rerank_candidates = candidates[:RERANK_POOL]
+
+        # ----------------------------------------------------------------- #
+        # 3. LLM rerank (with graceful fallback to RRF order)
+        # ----------------------------------------------------------------- #
+        with st.spinner("Reranking legally relevant sources..."):
+            candidate_blocks = []
+            for i, item in enumerate(rerank_candidates, start=1):
+                candidate_blocks.append({
+                    "id": i,
+                    "celex": item["celex"],
+                    "paragraph_number": item["paragraph_number"],
+                    "paragraph_index": item["paragraph_index"],
+                    "retrieval_source": item["retrieval_source"],
+                    "vector_score": item["vector_score"],
+                    "keyword_score": item["keyword_score"],
+                    "hybrid_score": item["hybrid_score"],
+                    "text": item["text"][:2000],
+                })
+
+            rerank_prompt = f"""
 You are a legal relevance reranker for EU Court of Justice case-law.
 
 User's standalone research question:
@@ -275,67 +469,70 @@ Important:
 
 JSON format:
 [
-  {{"id": 1, "score": 9, "reason": "short reason"}},
-  {{"id": 2, "score": 3, "reason": "short reason"}}
+{{"id": 1, "score": 9, "reason": "short reason"}},
+{{"id": 2, "score": 3, "reason": "short reason"}}
 ]
 
 Candidates:
 {json.dumps(candidate_blocks, ensure_ascii=False)}
 """
+            score_map = {}
+            try:
+                rerank_response = client.responses.create(
+                    model=RERANK_MODEL,
+                    input=rerank_prompt,
+                )
+                scores = json.loads(rerank_response.output_text.strip())
+                score_map = {s["id"]: s for s in scores}
+            except Exception as rerank_err:
+                # Fallback: keep the RRF order rather than failing the request.
+                print("Reranker unavailable, falling back to hybrid order:", rerank_err)
+                score_map = {}
 
-        rerank_response = client.responses.create(
-            model="gpt-4.1-mini",
-            input=rerank_prompt
-        )
+            if score_map:
+                ranked = []
+                for i, item in enumerate(rerank_candidates, start=1):
+                    s = score_map.get(i, {"score": 0, "reason": "No score returned"})
+                    ranked.append({
+                        **item,
+                        "rerank_score": float(s.get("score", 0)),
+                        "rerank_reason": s.get("reason", ""),
+                    })
+                ranked.sort(
+                    key=lambda x: (x["rerank_score"], x["hybrid_score"]),
+                    reverse=True,
+                )
+            else:
+                ranked = [
+                    {
+                        **item,
+                        "rerank_score": 0.0,
+                        "rerank_reason": "Reranker unavailable — using hybrid rank",
+                    }
+                    for item in rerank_candidates
+                ]
 
-        raw = rerank_response.output_text.strip()
+            top_results = ranked[:final_limit]
 
-        try:
-            scores = json.loads(raw)
-        except json.JSONDecodeError:
-            st.error("Reranker did not return valid JSON.")
-            st.code(raw)
-            st.stop()
+        # ----------------------------------------------------------------- #
+        # 4. Answer generation
+        # ----------------------------------------------------------------- #
+        with st.spinner("Generating answer..."):
+            context_blocks = []
+            for i, item in enumerate(top_results, start=1):
+                context_blocks.append(
+                    f"[Source {i}] CELEX: {item['celex']}, paragraph: {item['paragraph_number']}, "
+                    f"retrieval_source: {item['retrieval_source']}, "
+                    f"rerank_score: {item['rerank_score']}, "
+                    f"hybrid_score: {item['hybrid_score']:.4f}\n"
+                    f"{item['text']}"
+                )
+            context = "\n\n".join(context_blocks)
 
-        score_map = {item["id"]: item for item in scores}
-
-        ranked = []
-
-        for i, item in enumerate(rerank_candidates, start=1):
-            score_item = score_map.get(i, {"score": 0, "reason": "No score returned"})
-
-            ranked.append({
-                **item,
-                "rerank_score": float(score_item.get("score", 0)),
-                "rerank_reason": score_item.get("reason", "")
-            })
-
-        ranked.sort(
-            key=lambda x: (x["rerank_score"], x["hybrid_score"]),
-            reverse=True
-        )
-
-        top_results = ranked[:final_limit]
-
-    with st.spinner("Generating answer..."):
-        context_blocks = []
-
-        for i, item in enumerate(top_results, start=1):
-            context_blocks.append(
-                f"[Source {i}] CELEX: {item['celex']}, paragraph: {item['paragraph_number']}, "
-                f"retrieval_source: {item['retrieval_source']}, "
-                f"rerank_score: {item['rerank_score']}, "
-                f"hybrid_score: {item['hybrid_score']:.4f}\n"
-                f"{item['text']}"
-            )
-
-        context = "\n\n".join(context_blocks)
-
-        answer_prompt = f"""
+            answer_prompt = f"""
 You are Amicus, a careful EU law research assistant.
 
 Answer the user's latest message using ONLY the sources below and the recent conversation context.
-
 If the sources are insufficient, say that the current database is insufficient.
 Do not invent cases, principles, citations, or legal rules.
 
@@ -354,129 +551,93 @@ Latest user message:
 Sources:
 {context}
 """
-
-        answer = client.responses.create(
-            model="gpt-4.1-mini",
-            input=answer_prompt
-        )
-
-        assistant_answer = answer.output_text
-
-    try:
-        conn = get_db_connection()
-
-        with conn.cursor() as cur:
-
-            usage = answer.usage
-
-            input_tokens = getattr(usage, "input_tokens", None)
-            output_tokens = getattr(usage, "output_tokens", None)
-            total_tokens = getattr(usage, "total_tokens", None)
-
-            cur.execute("""
-                INSERT INTO amicus_queries (
-                    user_question,
-                    retrieval_question,
-                    input_tokens,
-                    output_tokens,
-                    total_tokens,
-                    candidate_count,
-                    source_count,
-                    retrieval_success,
-                    answer_length
-                )
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
-                RETURNING id
-            """, (
-                question,
-                retrieval_question,
-                input_tokens,
-                output_tokens,
-                total_tokens,
-                len(rerank_candidates),
-                len(top_results),
-                True,
-                len(assistant_answer)
-            ))
-
-            query_id = cur.fetchone()[0]
-
-            st.session_state.last_query_id = query_id
-
-            conn.commit()
-
-        conn.close()
+            answer = client.responses.create(
+                model=ANSWER_MODEL,
+                input=answer_prompt,
+            )
+            assistant_answer = answer.output_text
+            answer_usage = answer.usage
 
     except Exception as e:
-        print("Analytics logging failed:", e)
+        error_message = str(e)
+        assistant_answer = (
+            "Sorry — something went wrong while researching this question. "
+            "Please try again. If it persists, the database or model service may be unavailable."
+        )
+        st.error("Retrieval failed. The error has been logged.")
 
+    # --------------------------------------------------------------------- #
+    # 5. Analytics logging — runs for BOTH success and failure
+    # --------------------------------------------------------------------- #
+    elapsed = round(time.perf_counter() - t0, 3)
+    retrieval_success = bool(top_results) and error_message is None
+    query_id = log_query(
+        user_question=question,
+        retrieval_question=retrieval_question,
+        usage=answer_usage,
+        candidate_count=len(rerank_candidates),
+        source_count=len(top_results),
+        retrieval_success=retrieval_success,
+        answer_length=len(assistant_answer or ""),
+        response_time_seconds=elapsed,
+        error_message=error_message,
+    )
+    if query_id:
+        st.session_state.last_query_id = query_id
+
+    # --------------------------------------------------------------------- #
+    # 6. Render
+    # --------------------------------------------------------------------- #
     st.session_state.messages.append({
         "role": "assistant",
-        "content": assistant_answer
+        "content": assistant_answer,
     })
-
     st.session_state.messages = st.session_state.messages[-10:]
 
     with st.chat_message("assistant"):
         st.markdown(assistant_answer)
 
-    st.subheader("Sources")
+    if top_results:
+        st.subheader("Sources")
+        for i, item in enumerate(top_results, start=1):
+            celex = item["celex"]
+            eurlex_url = f"https://eur-lex.europa.eu/legal-content/EN/TXT/?uri=CELEX:{celex}"
+            with st.expander(
+                f"Source {i} — CELEX {celex}, para. {item['paragraph_number']} | "
+                f"{item['retrieval_source']} | rerank {item['rerank_score']} | "
+                f"hybrid {item['hybrid_score']:.4f}"
+            ):
+                st.markdown(f"[Open on EUR-Lex]({eurlex_url})")
+                st.write(f"Rerank reason: {item['rerank_reason']}")
+                st.write(f"Vector score: {item['vector_score']:.4f}")
+                st.write(f"Keyword score: {item['keyword_score']:.4f}")
+                st.write(item["text"])
 
-    for i, item in enumerate(top_results, start=1):
-        celex = item["celex"]
-        eurlex_url = f"https://eur-lex.europa.eu/legal-content/EN/TXT/?uri=CELEX:{celex}"
-
-        with st.expander(
-            f"Source {i} — CELEX {celex}, para. {item['paragraph_number']} | "
-            f"{item['retrieval_source']} | rerank {item['rerank_score']} | "
-            f"hybrid {item['hybrid_score']:.4f}"
-        ):
-            st.markdown(f"[Open on EUR-Lex]({eurlex_url})")
-            st.write(f"Rerank reason: {item['rerank_reason']}")
-            st.write(f"Vector score: {item['vector_score']:.4f}")
-            st.write(f"Keyword score: {item['keyword_score']:.4f}")
-            st.write(item["text"])
-
+# --------------------------------------------------------------------------- #
+# Feedback
+# --------------------------------------------------------------------------- #
 if "last_query_id" in st.session_state:
     st.markdown("---")
     st.caption("Was this answer helpful?")
-
     feedback_query_id = st.session_state.last_query_id
-
     col1, col2 = st.columns(2)
-
     with col1:
         if st.button("👍 Helpful", key=f"helpful_{feedback_query_id}"):
-            conn = get_db_connection()
-
-            with conn.cursor() as cur:
-                cur.execute("""
-                    UPDATE amicus_queries
-                    SET feedback = 1
-                    WHERE id = %s
-                """, (feedback_query_id,))
-
-                conn.commit()
-
-            conn.close()
-
+            with db() as conn:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        "UPDATE amicus_queries SET feedback = 1 WHERE id = %s",
+                        (feedback_query_id,),
+                    )
             st.session_state.feedback_given = "helpful"
             st.success("Thank you for your feedback.")
-
     with col2:
         if st.button("👎 Not Helpful", key=f"not_helpful_{feedback_query_id}"):
-            conn = get_db_connection()
-
-            with conn.cursor() as cur:
-                cur.execute("""
-                    UPDATE amicus_queries
-                    SET feedback = -1
-                    WHERE id = %s
-                """, (feedback_query_id,))
-
-                conn.commit()
-
-            conn.close()
-
+            with db() as conn:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        "UPDATE amicus_queries SET feedback = -1 WHERE id = %s",
+                        (feedback_query_id,),
+                    )
             st.session_state.feedback_given = "not_helpful"
             st.success("Thank you for your feedback.")
