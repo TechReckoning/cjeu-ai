@@ -79,7 +79,10 @@ and accumulating honest data (including failures).
 5. Tie-break equal rerank scores by citation authority (`decision_metrics.pagerank`):
    legal relevance always wins, `hybrid_score` is the final fallback.
 6. Answer (gpt-4.1) using ONLY retrieved sources, with CELEX/paragraph citations.
-7. Log to `amicus_queries` (successes AND failures); 👍/👎 feedback.
+7. **Doctrinal context** panel below Sources (citation-graph derived; NOT part of
+   the grounded answer, no LLM): foundational authorities (cases the retrieved
+   pool cites, by support × authority) + later "distinguishing" treatment.
+8. Log to `amicus_queries` (successes AND failures); 👍/👎 feedback.
 
 ## Changes already applied (do not regress)
 - RRF fusion replaced incommensurable score-weighting (cosine vs ts_rank_cd).
@@ -133,8 +136,10 @@ TODO:
 - **Recompute fan-out** — run `extract_citations.py` + `import_cellar_citations.py`
   + `compute_citation_metrics.py` after each ingestion so the graph stays current
   (idempotent; each source rebuild merges into `citation_edges`).
-- **Answer enrichment** — feed "later cases that *distinguish* this one" into the
-  answer for a "still good law?" signal.
+- **Answer enrichment** — DONE: "Doctrinal context" panel (foundational
+  authorities + "distinguishing" later-treatment) renders below Sources in
+  `app.py`. Labels are CELEX + "cited by N" for now; party-name extraction from
+  `citation_mentions.raw_reference` is a planned fast-follow.
 - Stay in Postgres (recursive CTEs) at this scale; only consider a graph DB if
   interactive multi-hop becomes core.
 
