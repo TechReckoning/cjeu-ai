@@ -156,13 +156,20 @@ def main():
     conninfo, target = _build_conninfo()
     print(f"Target database: {target}" + ("  (DRY RUN — no writes)" if dry_run else ""))
 
-    conn = psycopg.connect(conninfo)
-    read_cur = conn.cursor(name="paragraph_scan")   # server-side cursor for the big scan
-    write_cur = conn.cursor()
+    # Two connections: read_conn streams the paginated scan, write_conn does
+    # lookups + writes. Interleaving two cursors on ONE connection deadlocks over
+    # the Supabase pooler, so they must be separate. Keyset pagination with a
+    # regular cursor (not a server-side named cursor, which also hung over the
+    # pooler) means there is no open server-side portal, so commits on write_conn
+    # never invalidate the scan.
+    read_conn = psycopg.connect(conninfo)
+    write_conn = psycopg.connect(conninfo)
+    read_cur = read_conn.cursor()
+    write_cur = write_conn.cursor()
 
     if not dry_run:
         write_cur.execute("DELETE FROM citation_mentions WHERE source = 'text';")
-        conn.commit()
+        write_conn.commit()
         print("Cleared previous text mentions (full rebuild).")
 
     resolved_cache = {}   # candidate_celex -> bool exists-in-corpus
@@ -178,15 +185,11 @@ def main():
                 resolved_cache[c] = c in present
         return resolved_cache
 
-    sql = "SELECT celex, paragraph_number, text FROM cjeu_paragraphs"
-    if limit:
-        sql += f" LIMIT {int(limit)}"
-    read_cur.execute(sql)
-
     stats = {"paragraphs": 0, "citations": 0, "resolved": 0, "unresolved": 0,
              "self": 0, "by_type": {}}
     pending = []
     BATCH = 500
+    CHUNK = 2000   # rows fetched per keyset page
 
     def flush(pending):
         if not pending:
@@ -223,23 +226,40 @@ def main():
                     ),
                 )
         if not dry_run:
-            conn.commit()
+            write_conn.commit()
 
-    for celex, paragraph_number, text in read_cur:
-        stats["paragraphs"] += 1
-        if not text:
-            continue
-        for c in parse_citations(text):
-            stats["citations"] += 1
-            c["citing_celex"] = celex
-            c["citing_paragraph_number"] = paragraph_number
-            pending.append(c)
-        if len(pending) >= BATCH:
-            flush(pending)
-            pending = []
-        if stats["paragraphs"] % 50000 == 0:
+    last_id = ""
+    remaining = limit
+    while remaining is None or remaining > 0:
+        n = CHUNK if remaining is None else min(CHUNK, remaining)
+        read_cur.execute(
+            "SELECT id, celex, paragraph_number, text FROM cjeu_paragraphs "
+            "WHERE id > %s ORDER BY id LIMIT %s;",
+            (last_id, n),
+        )
+        batch = read_cur.fetchall()
+        if not batch:
+            break
+        for row_id, celex, paragraph_number, text in batch:
+            stats["paragraphs"] += 1
+            if text:
+                for c in parse_citations(text):
+                    stats["citations"] += 1
+                    c["citing_celex"] = celex
+                    c["citing_paragraph_number"] = paragraph_number
+                    pending.append(c)
+            if len(pending) >= BATCH:
+                flush(pending)
+                pending = []
+        last_id = batch[-1][0]
+        if remaining is not None:
+            remaining -= len(batch)
+        if stats["paragraphs"] % 50000 < CHUNK:
             print(f"  scanned {stats['paragraphs']} paragraphs, "
-                  f"{stats['resolved']} resolved / {stats['unresolved']} unresolved")
+                  f"{stats['resolved']} resolved / {stats['unresolved']} unresolved",
+                  flush=True)
+        if len(batch) < n:
+            break
     flush(pending)
 
     if not dry_run:
@@ -257,7 +277,7 @@ def main():
             GROUP BY citing_celex, cited_celex;
             """
         )
-        conn.commit()
+        write_conn.commit()
         write_cur.execute("SELECT count(*) FROM citation_edges;")
         print(f"citation_edges rows: {write_cur.fetchone()[0]}")
 
@@ -273,7 +293,8 @@ def main():
 
     read_cur.close()
     write_cur.close()
-    conn.close()
+    read_conn.close()
+    write_conn.close()
 
 
 if __name__ == "__main__":
