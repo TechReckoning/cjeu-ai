@@ -362,6 +362,54 @@ Sources:
 
         assistant_answer = answer.output_text
 
+    try:
+        conn = get_db_connection()
+
+        with conn.cursor() as cur:
+
+            usage = answer.usage
+
+            input_tokens = getattr(usage, "input_tokens", None)
+            output_tokens = getattr(usage, "output_tokens", None)
+            total_tokens = getattr(usage, "total_tokens", None)
+
+            cur.execute("""
+                INSERT INTO amicus_queries (
+                    user_question,
+                    retrieval_question,
+                    input_tokens,
+                    output_tokens,
+                    total_tokens,
+                    candidate_count,
+                    source_count,
+                    retrieval_success,
+                    answer_length
+                )
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+                RETURNING id
+            """, (
+                question,
+                retrieval_question,
+                input_tokens,
+                output_tokens,
+                total_tokens,
+                len(rerank_candidates),
+                len(top_results),
+                True,
+                len(assistant_answer)
+            ))
+
+            query_id = cur.fetchone()[0]
+
+            st.session_state.last_query_id = query_id
+
+            conn.commit()
+
+        conn.close()
+
+    except Exception as e:
+        print("Analytics logging failed:", e)
+
     st.session_state.messages.append({
         "role": "assistant",
         "content": assistant_answer
@@ -388,3 +436,47 @@ Sources:
             st.write(f"Vector score: {item['vector_score']:.4f}")
             st.write(f"Keyword score: {item['keyword_score']:.4f}")
             st.write(item["text"])
+
+if "last_query_id" in st.session_state:
+    st.markdown("---")
+    st.caption("Was this answer helpful?")
+
+    feedback_query_id = st.session_state.last_query_id
+
+    col1, col2 = st.columns(2)
+
+    with col1:
+        if st.button("👍 Helpful", key=f"helpful_{feedback_query_id}"):
+            conn = get_db_connection()
+
+            with conn.cursor() as cur:
+                cur.execute("""
+                    UPDATE amicus_queries
+                    SET feedback = 1
+                    WHERE id = %s
+                """, (feedback_query_id,))
+
+                conn.commit()
+
+            conn.close()
+
+            st.session_state.feedback_given = "helpful"
+            st.success("Thank you for your feedback.")
+
+    with col2:
+        if st.button("👎 Not Helpful", key=f"not_helpful_{feedback_query_id}"):
+            conn = get_db_connection()
+
+            with conn.cursor() as cur:
+                cur.execute("""
+                    UPDATE amicus_queries
+                    SET feedback = -1
+                    WHERE id = %s
+                """, (feedback_query_id,))
+
+                conn.commit()
+
+            conn.close()
+
+            st.session_state.feedback_given = "not_helpful"
+            st.success("Thank you for your feedback.")
