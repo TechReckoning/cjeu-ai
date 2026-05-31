@@ -418,6 +418,31 @@ Return only the standalone question. No markdown.
             candidates.sort(key=lambda x: x["hybrid_score"], reverse=True)
             rerank_candidates = candidates[:RERANK_POOL]
 
+            # Citation-graph authority (PageRank) for the candidate decisions,
+            # used ONLY as a tie-breaker among equally-relevant rerank scores.
+            # Resilient: any failure leaves authority at 0 (no ranking change).
+            authority_by_celex = {}
+            cand_celexes = list({item["celex"] for item in rerank_candidates})
+            if cand_celexes:
+                try:
+                    with db() as conn:
+                        with conn.cursor() as cur:
+                            cur.execute(
+                                "SELECT celex, pagerank, in_degree "
+                                "FROM decision_metrics WHERE celex = ANY(%s);",
+                                (cand_celexes,),
+                            )
+                            for celex, pagerank, in_degree in cur.fetchall():
+                                authority_by_celex[celex] = (
+                                    float(pagerank or 0.0), int(in_degree or 0)
+                                )
+                except Exception as auth_err:
+                    print("Authority lookup failed (continuing without it):", auth_err)
+            for item in rerank_candidates:
+                pr, indeg = authority_by_celex.get(item["celex"], (0.0, 0))
+                item["authority_pagerank"] = pr
+                item["citation_in_degree"] = indeg
+
         # ----------------------------------------------------------------- #
         # 3. LLM rerank (with graceful fallback to RRF order)
         # ----------------------------------------------------------------- #
@@ -499,7 +524,7 @@ Candidates:
                         "rerank_reason": s.get("reason", ""),
                     })
                 ranked.sort(
-                    key=lambda x: (x["rerank_score"], x["hybrid_score"]),
+                    key=lambda x: (x["rerank_score"], x["authority_pagerank"], x["hybrid_score"]),
                     reverse=True,
                 )
             else:
@@ -611,6 +636,8 @@ Sources:
                 st.write(f"Rerank reason: {item['rerank_reason']}")
                 st.write(f"Vector score: {item['vector_score']:.4f}")
                 st.write(f"Keyword score: {item['keyword_score']:.4f}")
+                if item.get("citation_in_degree"):
+                    st.write(f"Citation authority: cited by {item['citation_in_degree']} decisions")
                 st.write(item["text"])
 
 # --------------------------------------------------------------------------- #
