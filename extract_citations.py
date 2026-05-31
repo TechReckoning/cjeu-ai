@@ -175,6 +175,31 @@ def _build_conninfo():
     raise SystemExit("No DB connection configured. Set DATABASE_URL or SUPABASE_*.")
 
 
+# Rebuild citation_edges from ALL mentions (text + cellar). mention_count counts
+# only text occurrences (paragraph density); from_text/from_cellar flag which
+# sources contributed; dominant_relation_type comes from text mentions (mode()
+# ignores cellar's NULL relation_type). Shared by extract_citations and
+# import_cellar_citations so the two sources never clobber each other's edges.
+_REBUILD_EDGES_SQL = """
+TRUNCATE citation_edges;
+INSERT INTO citation_edges (citing_celex, cited_celex, mention_count,
+                            dominant_relation_type, from_text, from_cellar)
+SELECT citing_celex, cited_celex,
+       count(*) FILTER (WHERE source = 'text') AS mention_count,
+       mode() WITHIN GROUP (ORDER BY relation_type) AS dominant_relation_type,
+       bool_or(source = 'text')   AS from_text,
+       bool_or(source = 'cellar') AS from_cellar
+FROM citation_mentions
+WHERE cited_celex IS NOT NULL
+GROUP BY citing_celex, cited_celex;
+"""
+
+
+def rebuild_citation_edges(cur):
+    """Rebuild citation_edges from all citation_mentions (text + cellar)."""
+    cur.execute(_REBUILD_EDGES_SQL)
+
+
 def main():
     from dotenv import load_dotenv
     import psycopg
@@ -288,19 +313,7 @@ def main():
             print(f"  wrote {min(i + WBATCH, len(mentions))}/{len(mentions)}", flush=True)
 
     print("Rebuilding citation_edges...", flush=True)
-    write_cur.execute("TRUNCATE citation_edges;")
-    write_cur.execute(
-        """
-        INSERT INTO citation_edges (citing_celex, cited_celex, mention_count,
-                                    dominant_relation_type, from_text)
-        SELECT citing_celex, cited_celex, count(*) AS mention_count,
-               mode() WITHIN GROUP (ORDER BY relation_type) AS dominant_relation_type,
-               true
-        FROM citation_mentions
-        WHERE source = 'text' AND cited_celex IS NOT NULL
-        GROUP BY citing_celex, cited_celex;
-        """
-    )
+    rebuild_citation_edges(write_cur)
     write_conn.commit()
     write_cur.execute("SELECT count(*) FROM citation_edges;")
     print(f"citation_edges rows: {write_cur.fetchone()[0]}")

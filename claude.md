@@ -62,10 +62,11 @@ and accumulating honest data (including failures).
   `citing_celex` · `citing_paragraph_number` · `cited_celex` (NULL if unresolved) ·
   `cited_paragraph_number` · `relation_type` (cites/see/following/by_analogy/distinguishing)
   · `signal_phrase` · `raw_reference` · `source` ('text'|'cellar') · `confidence`.
-- **`citation_edges`** (~54k) — deduplicated decision→decision edges (networkx input):
-  `citing_celex` · `cited_celex` · `mention_count` · `dominant_relation_type` ·
-  `from_text` · `from_cellar`.
-- **`decision_metrics`** (~10.7k) — offline networkx scores per decision:
+- **`citation_edges`** (~57k) — deduplicated decision→decision edges (networkx input):
+  `citing_celex` · `cited_celex` · `mention_count` (text occurrences) ·
+  `dominant_relation_type` · `from_text` · `from_cellar`. Rebuilt from
+  `citation_mentions` aggregating BOTH sources (`rebuild_citation_edges`).
+- **`decision_metrics`** (~11.1k) — offline networkx scores per decision:
   `in_degree` · `out_degree` · `pagerank` · `authority` · `hub` · `community_id`.
   Joined at query time for the ranking tie-breaker.
 
@@ -117,15 +118,21 @@ DONE:
   and writes `decision_metrics` (weighted PageRank, HITS, Louvain communities).
   `app.py` uses `pagerank` as a PURE tie-breaker among equal rerank scores
   (relevance always wins) and shows "cited by N decisions" per source. Top-PageRank
-  nodes are the EU-law canon (Marshall, Dassonville, Bosman, Francovich) — a good
-  sanity check. Needs `networkx` + `scipy` (in requirements).
+  nodes are the EU-law canon (Becker, Marshall, Von Colson, Dassonville, Bosman,
+  Cassis de Dijon) — a good sanity check. Needs `networkx` + `scipy` (in requirements).
+- **Phase 2 (partial)** — `import_cellar_citations.py` imports the existing
+  cjeu-py `gc_citations.parquet` (CELLAR CDM metadata) as `source='cellar'`
+  mentions, keeping edges whose both endpoints are corpus decisions: 18,328 edges,
+  of which 15,871 CONFIRM text edges (`from_text AND from_cellar`) and 2,457 are
+  new. Edges now carry both source flags; metrics recomputed. The parquet is a
+  capped/partial download (~7.7k of 13.9k citing decisions).
 
 TODO:
-- **Phase 2** — enable CELLAR citations (drop `--skip-citations` in the shell
-  scripts) to add the authoritative CELEX→CELEX skeleton (`source='cellar'`),
-  confirm text edges, and resolve many of the ~46k unresolved.
-- **Recompute fan-out** — run `extract_citations.py` + `compute_citation_metrics.py`
-  after each ingestion so the graph stays current (idempotent full rebuild).
+- **Phase 2 (full)** — re-run `cjeu-py download-cellar` WITHOUT `--skip-citations`
+  across all decisions (no cap) for the complete CELLAR skeleton, then re-import.
+- **Recompute fan-out** — run `extract_citations.py` + `import_cellar_citations.py`
+  + `compute_citation_metrics.py` after each ingestion so the graph stays current
+  (idempotent; each source rebuild merges into `citation_edges`).
 - **Answer enrichment** — feed "later cases that *distinguish* this one" into the
   answer for a "still good law?" signal.
 - Stay in Postgres (recursive CTEs) at this scale; only consider a graph DB if
