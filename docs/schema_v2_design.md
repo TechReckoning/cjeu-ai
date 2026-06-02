@@ -59,6 +59,8 @@ Two prototypes proved the fix is tractable:
 | `judge_rapporteur` | text | `…delivered_by_judge` | resolved name |
 | `country_origin` | text | `case-law_originates_in_country` | ISO/label, prelim. refs |
 | `procedure_language` | text | `case-law_uses_procedure_language` | authentic language |
+| `title` | text | EUR-Lex case title | full title, e.g. "Alstom Transport SA v CFR" |
+| `parties` | text[] | parsed from title | {"Alstom Transport SA","CFR"} |
 | `cites` | text[] | `work_cites_work` (→ CELEX) | decision→work citations |
 | `interprets_legislation` | text[] | `case-law_interpretes_resource_legal` | CELEX of legislation |
 | `ingested_at` | timestamptz | — | provenance |
@@ -124,12 +126,21 @@ cases before hitting the hard old ones.
 - **Name resolution** (AG/judge cellar URIs → names) needs a second lookup;
   cache per agent URI.
 
-## Open questions for review
-1. Include `ORDER` and `OPIN_AG` (AG opinions) as their own decisions, or
-   judgments only? (Opinions are persuasive and citation-relevant.)
-2. Keep `summary`/`operative` paragraphs in `paragraphs_v2` (tagged) or grounds
-   only? (Recommend keep + tag — section filter handles ranking.)
-3. Party names: extract from EUR-Lex title (not a reliable CDM predicate) into a
-   `parties`/`title` column now, or defer?
-4. Per-year validation gate before proceeding to the next year, or run straight
-   through and validate at the end?
+## Resolved decisions (2026-06-02)
+1. **Doc types: Judgments only** (`doc_type = JUDG`). Orders and AG opinions are
+   excluded for the rebuild — matches the core of the current corpus; revisit later.
+2. **Sections: keep all, tagged.** `paragraphs_v2` stores summary / grounds /
+   operative, each tagged via `section`; retrieval filters/ranks by section
+   (this is the clean fix for the headnote problem).
+3. **Party names: capture now.** Add `title` (full case title) + `parties`
+   (parsed) columns to `decisions_v2`, extracted from the EUR-Lex title (not a
+   reliable CDM predicate). Enables name-based search and friendlier citations.
+4. **Validation: per-year gate.** After each year's ingestion run integrity
+   checks (within-section numbering monotonic, fetch-status counts, paragraph/
+   decision counts, embedding non-null) before proceeding to the previous year.
+
+### Schema deltas from these decisions
+- `decisions_v2`: add `title text` and `parties text[]`.
+- Ingestion discovery filters to `JUDG` only.
+- A per-year `validate_year()` step gates progression (logs a report; halts on
+  anomalies above a threshold).
