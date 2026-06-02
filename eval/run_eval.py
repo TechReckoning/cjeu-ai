@@ -46,6 +46,7 @@ FINAL_LIMIT = 8
 
 K = int(sys.argv[sys.argv.index("--k") + 1]) if "--k" in sys.argv else FINAL_LIMIT
 USE_RERANK = "--no-rerank" not in sys.argv
+DEMOTE = "--no-demote" not in sys.argv   # down-rank non-judgment paragraphs (default on)
 
 
 def conninfo():
@@ -61,31 +62,43 @@ def retrieve(cur, question):
     results = {}
     cur.execute(f"SET LOCAL hnsw.ef_search = {HNSW_EF_SEARCH};")
     cur.execute(
-        """SELECT id,celex,paragraph_number,text, 1-(embedding <=> %s::vector)
-           FROM cjeu_paragraphs ORDER BY embedding <=> %s::vector LIMIT %s;""",
+        """SELECT p.id,p.celex,p.paragraph_number,p.text,
+                  1-(p.embedding <=> %s::vector),
+                  coalesce(m.doc_kind,'judgment')
+           FROM cjeu_paragraphs p
+           LEFT JOIN paragraph_meta m ON m.id = p.id
+           ORDER BY p.embedding <=> %s::vector LIMIT %s;""",
         (emb, emb, CANDIDATE_LIMIT),
     )
-    for rank, (rid, celex, pn, text, vs) in enumerate(cur.fetchall(), 1):
+    for rank, (rid, celex, pn, text, vs, kind) in enumerate(cur.fetchall(), 1):
         results[rid] = {"celex": celex, "paragraph_number": pn, "text": text,
-                        "vr": rank, "kr": None}
+                        "vr": rank, "kr": None, "doc_kind": kind}
     cur.execute(
-        """SELECT id,celex,paragraph_number,text
-           FROM cjeu_paragraphs
-           WHERE search_vector @@ websearch_to_tsquery(%s::regconfig,%s)
-           ORDER BY ts_rank_cd(search_vector,websearch_to_tsquery(%s::regconfig,%s)) DESC
+        """SELECT p.id,p.celex,p.paragraph_number,p.text, coalesce(m.doc_kind,'judgment')
+           FROM cjeu_paragraphs p
+           LEFT JOIN paragraph_meta m ON m.id = p.id
+           WHERE p.search_vector @@ websearch_to_tsquery(%s::regconfig,%s)
+           ORDER BY ts_rank_cd(p.search_vector,websearch_to_tsquery(%s::regconfig,%s)) DESC
            LIMIT %s;""",
         (FTS_CONFIG, question, FTS_CONFIG, question, CANDIDATE_LIMIT),
     )
-    for rank, (rid, celex, pn, text) in enumerate(cur.fetchall(), 1):
+    for rank, (rid, celex, pn, text, kind) in enumerate(cur.fetchall(), 1):
         if rid in results:
             results[rid]["kr"] = rank
         else:
             results[rid] = {"celex": celex, "paragraph_number": pn, "text": text,
-                            "vr": None, "kr": rank}
+                            "vr": None, "kr": rank, "doc_kind": kind}
     for it in results.values():
         vr, kr = it["vr"], it["kr"]
         it["hybrid"] = (1/(K_RRF+vr) if vr else 0) + (1/(K_RRF+kr) if kr else 0)
-    cands = sorted(results.values(), key=lambda x: x["hybrid"], reverse=True)[:RERANK_POOL]
+        it["is_judgment"] = 1 if it["doc_kind"] == "judgment" else 0
+    if DEMOTE:
+        # judgment paragraphs first, then by hybrid — keeps summaries retrievable
+        # but stops their near-duplicate text outranking real holdings.
+        cands = sorted(results.values(), key=lambda x: (x["is_judgment"], x["hybrid"]),
+                       reverse=True)[:RERANK_POOL]
+    else:
+        cands = sorted(results.values(), key=lambda x: x["hybrid"], reverse=True)[:RERANK_POOL]
     return cands
 
 
