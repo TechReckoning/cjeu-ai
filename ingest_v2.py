@@ -109,11 +109,32 @@ def fetch_metadata(celex):
 # --------------------------------------------------------------------------- #
 # EUR-Lex HTML — fetch + era-aware paragraph parse (promoted from prototype)
 # --------------------------------------------------------------------------- #
+def has_english_expression(celex):
+    """True if an ENG expression exists (text published in English). Recent
+    judgments appear in CELLAR metadata before their text manifestations land,
+    so the EUR-Lex EN page 404s — we skip those (status='no_english_text')."""
+    q = f'''PREFIX cdm: <http://publications.europa.eu/ontology/cdm#>
+    ASK {{
+      ?w cdm:resource_legal_id_celex "{celex}"{XSD_STR} .
+      ?e cdm:expression_belongs_to_work ?w .
+      ?e cdm:expression_uses_language <http://publications.europa.eu/resource/authority/language/ENG> .
+    }}'''
+    data = urllib.parse.urlencode({"query": q, "format": "application/sparql-results+json"}).encode()
+    req = urllib.request.Request(SPARQL, data=data, headers=HEADERS)
+    with urllib.request.urlopen(req, timeout=60) as r:
+        return json.load(r).get("boolean", False)
+
+
 def fetch_html(celex, timeout=90):
     url = f"https://eur-lex.europa.eu/legal-content/EN/TXT/?uri=CELEX:{celex}"
     req = urllib.request.Request(url, headers=HEADERS)
-    with urllib.request.urlopen(req, timeout=timeout) as r:
-        return r.read().decode("utf-8", errors="ignore")
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            return r.read().decode("utf-8", errors="ignore")
+    except urllib.error.HTTPError as e:
+        if e.code == 404:
+            return ""
+        raise
 
 
 _SECTION_MARKERS = [
@@ -222,6 +243,21 @@ def main():
             meta = {}
         if meta.get("ecli"):
             stats["with_meta"] += 1
+
+        # Skip text fetch when no English text is published yet (recent cases).
+        try:
+            eng = has_english_expression(celex)
+        except Exception:
+            eng = True   # assume yes; fetch will reveal otherwise
+        if not eng:
+            stats["no_english_text"] = stats.get("no_english_text", 0) + 1
+            rows_dec.append({"celex": celex, "meta": meta, "title": None,
+                             "parties": [], "fetch_status": "no_english_text"})
+            if i % 25 == 0:
+                print(f"  processed {i}/{len(celexes)}  paras={stats['paragraphs']}", flush=True)
+            time.sleep(0.2)
+            continue
+
         try:
             html = fetch_html(celex)
         except Exception as e:
