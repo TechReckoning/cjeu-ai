@@ -1,0 +1,13 @@
+{
+  "id": "001_procurement_time_limit",
+  "question": "From what moment does the time limit for challenging a contracting authority's decision in public procurement begin to run?",
+  "topic": "Public procurement — review procedures — limitation period (Directive 89/665, Art. 2c)",
+  "expected": [
+    {"celex": "62020CJ0532", "name": "Alstom Transport v CFR", "paragraphs": [32, 37]},
+    {"celex": "62008CJ0406", "name": "Uniplex (UK) v NHS BSA", "paragraphs": [32, 34]},
+    {"celex": "62013CJ0161", "name": "Idrodinamica Spurgo Velox", "paragraphs": [37]}
+  ],
+  "gold_answer": "The time limit runs from the moment the claimant knew, or ought to have known, of the alleged infringement (the ground of unlawfulness) affecting the contested act — which presupposes a genuine, practical opportunity to become aware of those reasons, not a merely abstract one. Where the contracting authority's reasons were not communicated (by publication or notification), the period starts from the communication of the relevant reasons, not the date the decision was received (Directive 89/665, Art. 2c).",
+  "source": "Amicus_1.docx — expert legal memo (section I), provided 2026-06-02",
+  "notes": "All three cases + the cited gold paragraphs are present in the corpus. Primary metric: did we retrieve the right CASES (CELEX) in top-k. Secondary: exact gold-paragraph precision."
+}
