@@ -1,0 +1,13 @@
+{
+  "id": "007_procurement_optional_exclusion_grounds",
+  "question": "Can Member States transpose the optional exclusion grounds in Article 57(4) of Directive 2014/24/EU as mandatory exclusion grounds in their national legislation?",
+  "topic": "Public procurement — optional grounds for exclusion — Member State discretion in transposition (Directive 2014/24, Art. 57(4))",
+  "expected": [
+    {"celex": "62022CJ0066", "name": "Infraestruturas de Portugal / Futrifer", "paragraphs": [58]},
+    {"celex": "62020CJ0210", "name": "Rad Service", "paragraphs": [28]},
+    {"celex": "62018CJ0395", "name": "Tim", "paragraphs": [34]}
+  ],
+  "gold_answer": "Yes. Article 57(4) of Directive 2014/24 obliges Member States to transpose the facultative grounds for exclusion, and in doing so they may provide for either the option OR the obligation for contracting authorities to apply them (Infraestruturas de Portugal/Futrifer, C-66/22, para 58). Member States enjoy discretion and may incorporate the grounds with varying degrees of rigour, including as mandatory (Rad Service, C-210/20, para 28; Tim, C-395/18, para 34).",
+  "source": "Amicus_3.docx — expert legal memo (section VII), provided 2026-06-02",
+  "notes": "All three cases present with their gold paragraphs."
+}

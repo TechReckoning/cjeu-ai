@@ -1,0 +1,11 @@
+{
+  "id": "009_eu_funds_new_law_future_effects",
+  "question": "May a new law apply to the future effects of situations that arose under the former law, in the context of control and recovery of improperly used EU funds and related co-financing?",
+  "topic": "Protection of EU financial interests — financial corrections — legal certainty / legitimate expectations / temporal application (Reg. 2988/95, Reg. 1083/2006)",
+  "expected": [
+    {"celex": "62014CJ0260", "name": "Judetul Neamt / Judetul Bacau (Joined C-260/14 & C-261/14)", "paragraphs": []}
+  ],
+  "gold_answer": "Yes. The principles of legal certainty and protection of legitimate expectations do not preclude a Member State from applying financial corrections governed by internal legislation that entered into force after an alleged breach, provided it is a question of applying new rules to the FUTURE EFFECTS of situations that arose under the earlier rules — a matter for the national court to determine on the relevant circumstances (Joined Cases C-260/14 and C-261/14, Judetul Neamt and Judetul Bacau).",
+  "source": "Amicus_3.docx — expert legal memo (section IX), provided 2026-06-02",
+  "notes": "Joined case C-260/14 present (58 paragraphs). The memo quotes the operative part rather than pinning specific grounds paragraphs, so paragraphs is left empty: case-level recall is the metric here."
+}

@@ -1,0 +1,14 @@
+{
+  "id": "008_copyright_work_concept_cofemel",
+  "question": "What are the criteria that must be assessed in order to qualify a creation as a 'work' within the meaning of EU law?",
+  "topic": "Copyright — autonomous EU concept of 'work' — originality and identifiability (Directive 2001/29)",
+  "expected": [
+    {"celex": "62017CJ0683", "name": "Cofemel", "paragraphs": [29, 30, 31, 32, 50]},
+    {"celex": "62008CJ0005", "name": "Infopaq", "paragraphs": [37, 39]},
+    {"celex": "62017CJ0310", "name": "Levola Hengelo", "paragraphs": [33, 35, 36, 37, 40]}
+  ],
+  "corpus_gap": true,
+  "gold_answer": "Two cumulative conditions. First, an original subject matter that is the author's own intellectual creation — original meaning it reflects the author's personality through free and creative choices; if dictated by technical considerations leaving no creative freedom, it is not original. Second, the 'work' must be an expression identifiable with sufficient precision and objectivity (Cofemel, C-683/17, paras 29-32; Infopaq, C-5/08, paras 37, 39; Levola Hengelo, C-310/17, para 40).",
+  "source": "Amicus_3.docx — expert legal memo (section VIII), provided 2026-06-02",
+  "notes": "corpus_gap: ALL three controlling copyright cases (Cofemel, Infopaq, Levola) are ABSENT from the corpus and absent from the citation graph (in_degree 0). Indicates a systematic copyright/IP coverage gap. Excluded from the main aggregate; documents the gap."
+}

@@ -1,0 +1,13 @@
+{
+  "id": "010_primacy_disapply_national_law",
+  "question": "How should a national court proceed when requested to apply an EU regulation in preference to national legal provisions that are contrary to that regulation?",
+  "topic": "Primacy of EU law — direct applicability of regulations — national court's duty to disapply conflicting national law (Art. 288 TFEU)",
+  "expected": [
+    {"celex": "61977CJ0106", "name": "Simmenthal", "paragraphs": []},
+    {"celex": "61998CJ0258", "name": "Commission v Italy (C-258/98)", "paragraphs": []},
+    {"celex": "61995CJ0072", "name": "Kraaijeveld", "paragraphs": [57, 58, 59, 60, 61]}
+  ],
+  "gold_answer": "A national court must give full effect to directly applicable EU law (a regulation is binding in its entirety and directly applicable, Art. 288 TFEU), if necessary refusing of its own motion to apply any conflicting national provision, even one adopted later, without awaiting its prior setting aside by legislative or constitutional means (Simmenthal, C-106/77; C-258/98). Where the field is of significant EU-law importance and the protected interest is general, the national court must raise EU-law provisions of its own motion (Kraaijeveld, C-72/95, paras 57-61).",
+  "source": "Amicus_3.docx — expert legal memo (section X), provided 2026-06-02",
+  "notes": "DATA ISSUE: Simmenthal (61977CJ0106) is in the corpus but mis-parsed — only 7 paragraphs stored, numbered 1-4 twice (catchword + fragment); the memo's cited paras 15-16 do NOT exist in our data. Kraaijeveld present with gold paras 57-61. C-258/98 and Rewe (61980CJ0158) present. C-115/08 (62008CJ0115) and Eco Swiss (61997CJ0126) ABSENT. Pinned to the retrievable controlling authorities; case-level recall is the main metric."
+}
