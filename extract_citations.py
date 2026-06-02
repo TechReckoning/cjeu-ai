@@ -251,6 +251,11 @@ def main():
             stats["paragraphs"] += 1
             if not text:
                 continue
+            # Skip official Summary/Resolution/Info docs (CELEX _SUM/_RES/_INF):
+            # they are near-duplicates of the real judgment, which is itself a
+            # citing node, so counting them double-weights those citations.
+            if celex.endswith(("_SUM", "_RES", "_INF")):
+                continue
             for c in parse_citations(text):
                 stats["citations"] += 1
                 cand = c["candidate_celex"]
