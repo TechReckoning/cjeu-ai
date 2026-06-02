@@ -1,0 +1,11 @@
+{
+  "id": "003_procurement_special_regulations_selection",
+  "question": "May a contracting authority reject a tender as unacceptable on the basis of obligations arising from special regulations applicable to activities related to the contract, where those obligations were not expressly mentioned in the procurement documents?",
+  "topic": "Public procurement — selection criteria — transparency and proportionality (Directive 2014/24, Art. 18(1))",
+  "expected": [
+    {"celex": "62021CJ0403", "name": "NV Construct", "paragraphs": [68, 69]}
+  ],
+  "gold_answer": "No. Obligations under special laws applicable to activities connected with the contract cannot automatically be added as selection criteria beyond those expressly set out in the procurement documents. The principles of proportionality and transparency in Art. 18(1) of Directive 2014/24 preclude automatically supplementing the procurement documents with qualification criteria not set out in them (NV Construct, C-403/21, paras 68-69).",
+  "source": "Amicus_2.docx — expert legal memo (section V), provided 2026-06-02",
+  "notes": "NV Construct present with both gold paragraphs."
+}

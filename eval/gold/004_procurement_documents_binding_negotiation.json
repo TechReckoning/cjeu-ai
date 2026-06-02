@@ -1,0 +1,12 @@
+{
+  "id": "004_procurement_documents_binding_negotiation",
+  "question": "May a contracting authority negotiate the content of the procurement documents with economic operators during the course of the procurement procedure?",
+  "topic": "Public procurement — binding nature of the procurement documents — contracting authority must comply with its own criteria",
+  "expected": [
+    {"celex": "62015CJ0027", "name": "Pippo Pizzo", "paragraphs": [39, 42]},
+    {"celex": "62021CJ0403", "name": "NV Construct", "paragraphs": [68, 69]}
+  ],
+  "gold_answer": "No. The procurement documents are binding on both the contracting authority and the participating operators. A contracting authority must comply strictly with the criteria it has itself established (Pippo Pizzo, C-27/15, paras 39, 42), and the procurement documents cannot be automatically supplemented with criteria not set out in them (NV Construct, C-403/21, paras 68-69). Neither party may negotiate the content of the procurement documents during the procedure.",
+  "source": "Amicus_2.docx — expert legal memo (section VI), provided 2026-06-02",
+  "notes": "Both cases present with their gold paragraphs."
+}

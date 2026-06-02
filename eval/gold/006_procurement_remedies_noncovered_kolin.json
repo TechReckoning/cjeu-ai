@@ -1,0 +1,13 @@
+{
+  "id": "006_procurement_remedies_noncovered_kolin",
+  "question": "Are economic operators from non-covered countries permitted to invoke national provisions based on EU public procurement law in an appeal procedure, and if not how can legal remedies be ensured?",
+  "topic": "Public procurement — remedies for third-country operators — national law vs EU law (Kolin, Qingdao)",
+  "expected": [
+    {"celex": "62022CJ0652", "name": "Kolin", "paragraphs": [65, 66]},
+    {"celex": "62022CJ0266", "name": "Qingdao", "paragraphs": [66]}
+  ],
+  "corpus_gap": true,
+  "gold_answer": "No. National authorities cannot interpret the provisions transposing EU procurement directives as also applying to operators from third countries that have not concluded an agreement with the EU (Kolin, C-652/22, para 65). A complaint by such operators that the contracting authority infringed requirements (e.g. transparency, proportionality) can be examined only under national law, not EU law (Kolin para 66; Qingdao, C-266/22, para 66). Remedies, if any, must rest on national provisions that do not transpose EU procurement law.",
+  "source": "Amicus_2.docx — expert legal memo (section IV), provided 2026-06-02",
+  "notes": "corpus_gap: Kolin (C-652/22) absent from corpus; Qingdao (C-266/22) present with para 66. Excluded from the main aggregate; reported separately."
+}

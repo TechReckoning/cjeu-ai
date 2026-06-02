@@ -167,6 +167,7 @@ def main():
     agg = {"recall": [], "mrr": [], "ndcg": [], "para_recall": []}
     for f in files:
         g = json.load(open(f))
+        gap = bool(g.get("corpus_gap"))
         gold_celexes = [e["celex"] for e in g["expected"]]
         gold_paras = {(e["celex"], p) for e in g["expected"] for p in e.get("paragraphs", [])}
 
@@ -179,10 +180,14 @@ def main():
         para_hits = gold_paras & final_pairs
         para_recall = len(para_hits) / len(gold_paras) if gold_paras else 0.0
 
-        agg["recall"].append(recall); agg["mrr"].append(mrr)
-        agg["ndcg"].append(ndcg); agg["para_recall"].append(para_recall)
+        # corpus_gap entries (controlling case absent from corpus) are reported
+        # but EXCLUDED from the main aggregate so they don't unfairly penalise
+        # retrieval for data we don't hold.
+        if not gap:
+            agg["recall"].append(recall); agg["mrr"].append(mrr)
+            agg["ndcg"].append(ndcg); agg["para_recall"].append(para_recall)
 
-        print(f"[{g['id']}]")
+        print(f"[{g['id']}]" + ("  (corpus_gap — excluded from aggregate)" if gap else ""))
         print(f"  Q: {g['question']}")
         print(f"  CASE @k={K}: recall={recall:.2f} ({len(found)}/{len(gold_celexes)}) "
               f"MRR={mrr:.3f} nDCG={ndcg:.3f}  found={found}")
@@ -198,12 +203,13 @@ def main():
             print(f"    {e['celex']} {e['name'][:24]:24s} case_rank={pos}")
         print()
 
-    n = len(files)
-    print("=== AGGREGATE ===")
-    print(f"  mean CASE recall@{K} : {sum(agg['recall'])/n:.3f}")
-    print(f"  mean MRR             : {sum(agg['mrr'])/n:.3f}")
-    print(f"  mean nDCG@{K}         : {sum(agg['ndcg'])/n:.3f}")
-    print(f"  mean PARA recall     : {sum(agg['para_recall'])/n:.3f}")
+    n = len(agg["recall"])
+    print(f"=== AGGREGATE ({n} questions; corpus_gap entries excluded) ===")
+    if n:
+        print(f"  mean CASE recall@{K} : {sum(agg['recall'])/n:.3f}")
+        print(f"  mean MRR             : {sum(agg['mrr'])/n:.3f}")
+        print(f"  mean nDCG@{K}         : {sum(agg['ndcg'])/n:.3f}")
+        print(f"  mean PARA recall     : {sum(agg['para_recall'])/n:.3f}")
     conn.close()
 
 

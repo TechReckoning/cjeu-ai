@@ -1,0 +1,11 @@
+{
+  "id": "002_procurement_same_conditions_third_country",
+  "question": "May a contracting authority apply the same tender conditions to suppliers covered and not covered by EU international agreements when it decides to give access to a procurement procedure for both?",
+  "topic": "Public procurement — access of third-country economic operators (non-covered countries) — Directive 2014/24, Art. 25",
+  "expected": [
+    {"celex": "62022CJ0266", "name": "Qingdao", "paragraphs": [63, 66]}
+  ],
+  "gold_answer": "Yes. In the absence of EU acts, the contracting authority may decide whether to admit economic operators from a third country that has not concluded an international agreement with the EU guaranteeing equal and reciprocal access, and may apply the same conditions to them. However, those operators do not enjoy a right to no less favourable treatment under Art. 25 of Directive 2014/24, and any complaint about the arrangements can be examined only under national law, not EU law (Qingdao, C-266/22, paras 63, 66).",
+  "source": "Amicus_2.docx — expert legal memo (section III), provided 2026-06-02",
+  "notes": "Qingdao present with both gold paragraphs. Related authority Kolin (C-652/22) is cited in the memo but is NOT in the corpus (coverage gap)."
+}

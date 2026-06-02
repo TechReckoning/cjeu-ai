@@ -1,0 +1,12 @@
+{
+  "id": "005_procurement_national_authority_kolin",
+  "question": "When conducting a public procurement procedure, can a contracting authority (e.g. a Ministry) be seen as a 'national authority' that, in line with the Kolin judgment, is not empowered to take decisions concerning access by economic operators from non-covered countries?",
+  "topic": "Public procurement — exclusive EU competence over access of third-country operators (Kolin)",
+  "expected": [
+    {"celex": "62022CJ0652", "name": "Kolin", "paragraphs": [60, 61]}
+  ],
+  "corpus_gap": true,
+  "gold_answer": "Only the EU has competence to adopt an act of GENERAL APPLICATION concerning access of third-country economic operators to EU public procurement (Kolin, C-652/22, paras 60-61). A Ministry conducting a single procurement procedure acts as a contracting authority in that individual procedure, which is distinct from adopting acts of general application; the Kolin limit targets the latter.",
+  "source": "Amicus_2.docx — expert legal memo (section II), provided 2026-06-02",
+  "notes": "corpus_gap: Kolin (C-652/22, Oct 2024) is NOT in the corpus, though it is cited by cases that are. This entry measures behaviour when the controlling authority is absent; excluded from the main aggregate."
+}
