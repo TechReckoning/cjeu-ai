@@ -46,7 +46,7 @@ FINAL_LIMIT = 8
 
 K = int(sys.argv[sys.argv.index("--k") + 1]) if "--k" in sys.argv else FINAL_LIMIT
 USE_RERANK = "--no-rerank" not in sys.argv
-DEMOTE = "--no-demote" not in sys.argv   # down-rank non-judgment paragraphs (default on)
+DEMOTE = "--demote" in sys.argv   # down-rank non-judgment paragraphs (opt-in; off by default)
 
 
 def conninfo():

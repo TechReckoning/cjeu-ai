@@ -340,20 +340,18 @@ Return only the standalone question. No markdown.
                     cur.execute(
                         """
                         SELECT
-                            p.id, p.celex, p.url, p.paragraph_number, p.paragraph_index, p.text,
-                            1 - (p.embedding <=> %s::vector) AS vector_score,
-                            0::float AS keyword_score,
-                            coalesce(m.doc_kind, 'judgment') AS doc_kind
-                        FROM cjeu_paragraphs p
-                        LEFT JOIN paragraph_meta m ON m.id = p.id
-                        ORDER BY p.embedding <=> %s::vector
+                            id, celex, url, paragraph_number, paragraph_index, text,
+                            1 - (embedding <=> %s::vector) AS vector_score,
+                            0::float AS keyword_score
+                        FROM cjeu_paragraphs
+                        ORDER BY embedding <=> %s::vector
                         LIMIT %s;
                         """,
                         (query_embedding, query_embedding, candidate_limit),
                     )
                     for rank, row in enumerate(cur.fetchall(), start=1):
                         (row_id, celex, url, paragraph_number,
-                         paragraph_index, text, vector_score, keyword_score, doc_kind) = row
+                         paragraph_index, text, vector_score, keyword_score) = row
                         results[row_id] = {
                             "id": row_id,
                             "celex": celex,
@@ -366,7 +364,6 @@ Return only the standalone question. No markdown.
                             "vector_rank": rank,
                             "keyword_rank": None,
                             "retrieval_source": "vector",
-                            "doc_kind": doc_kind,
                         }
 
                     # Keyword arm — fetch order == keyword rank
@@ -374,14 +371,12 @@ Return only the standalone question. No markdown.
                     cur.execute(
                         """
                         SELECT
-                            p.id, p.celex, p.url, p.paragraph_number, p.paragraph_index, p.text,
+                            id, celex, url, paragraph_number, paragraph_index, text,
                             0::float AS vector_score,
-                            ts_rank_cd(p.search_vector,
-                                       websearch_to_tsquery(%s::regconfig, %s)) AS keyword_score,
-                            coalesce(m.doc_kind, 'judgment') AS doc_kind
-                        FROM cjeu_paragraphs p
-                        LEFT JOIN paragraph_meta m ON m.id = p.id
-                        WHERE p.search_vector @@ websearch_to_tsquery(%s::regconfig, %s)
+                            ts_rank_cd(search_vector,
+                                       websearch_to_tsquery(%s::regconfig, %s)) AS keyword_score
+                        FROM cjeu_paragraphs
+                        WHERE search_vector @@ websearch_to_tsquery(%s::regconfig, %s)
                         ORDER BY keyword_score DESC
                         LIMIT %s;
                         """,
@@ -390,7 +385,7 @@ Return only the standalone question. No markdown.
                     )
                     for rank, row in enumerate(cur.fetchall(), start=1):
                         (row_id, celex, url, paragraph_number,
-                         paragraph_index, text, vector_score, keyword_score, doc_kind) = row
+                         paragraph_index, text, vector_score, keyword_score) = row
                         if row_id in results:
                             results[row_id]["keyword_score"] = float(keyword_score)
                             results[row_id]["keyword_rank"] = rank
@@ -408,7 +403,6 @@ Return only the standalone question. No markdown.
                                 "vector_rank": None,
                                 "keyword_rank": rank,
                                 "retrieval_source": "keyword",
-                                "doc_kind": doc_kind,
                             }
 
             # ---- FUSION: Reciprocal Rank Fusion -------------------------- #
@@ -420,17 +414,8 @@ Return only the standalone question. No markdown.
                     + (1.0 / (K_RRF + kr) if kr else 0.0)
                 )
 
-            # Down-rank non-judgment paragraphs (official Summary/Resolution/Info
-            # docs, which are near-duplicates of the real judgment) so judgment
-            # text wins the pool; they stay retrievable as a fallback.
-            for item in results.values():
-                item["is_judgment"] = (
-                    1 if item.get("doc_kind", "judgment") == "judgment" else 0
-                )
             candidates = list(results.values())
-            candidates.sort(
-                key=lambda x: (x["is_judgment"], x["hybrid_score"]), reverse=True
-            )
+            candidates.sort(key=lambda x: x["hybrid_score"], reverse=True)
             rerank_candidates = candidates[:RERANK_POOL]
 
             # Citation-graph authority (PageRank) for the candidate decisions,
