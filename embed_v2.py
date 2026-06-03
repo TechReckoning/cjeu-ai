@@ -57,14 +57,20 @@ total = c.execute(f"SELECT count(*) FROM paragraphs_v2 WHERE {where}", params).f
 c.close()
 print(f"paragraphs to embed: {total}", flush=True)
 
+# Process at most CHUNK_CAP batches per invocation, then EXIT. A wrapper shell
+# loop relaunches the script; a fresh OS process per chunk means any hung pooler
+# connection dies with the process and cannot stall the whole run. --one-chunk
+# exits after a single chunk (used by the restart loop).
+CHUNK_CAP = 3 if "--one-chunk" in sys.argv else 10**9
 done = 0
-while True:
+for _ in range(CHUNK_CAP):
     c = connect()
     cur = c.cursor()
     cur.execute(f"SELECT id, text FROM paragraphs_v2 WHERE {where} LIMIT %s", params + [BATCH])
     rows = cur.fetchall()
     if not rows:
         c.close()
+        print("ALL_DONE", flush=True)
         break
     ids = [r[0] for r in rows]
     texts = [r[1][:8000] for r in rows]
@@ -74,7 +80,7 @@ while True:
     c.commit()
     c.close()                                # release connection each batch
     done += len(rows)
-    print(f"  embedded {done}/{total}", flush=True)
+    print(f"  embedded {done} this run", flush=True)
 
 c = connect()
 remaining = c.execute(f"SELECT count(*) FROM paragraphs_v2 WHERE {where}", params).fetchone()[0]
