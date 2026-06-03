@@ -402,14 +402,24 @@ def write_db(rows_dec, rows_par, no_embed):
                 embeddings[s+j] = d.embedding
             print(f"  embedded {min(s+300,len(texts))}/{len(texts)}", flush=True)
 
-    for idx, p in enumerate(rows_par):
-        cur.execute("""
-            INSERT INTO paragraphs_v2 (id,celex,paragraph_number,section,seq,text,embedding,search_vector)
-            VALUES (%s,%s,%s,%s,%s,%s,%s, to_tsvector(%s::regconfig, coalesce(%s,'')))
-            ON CONFLICT (id) DO NOTHING
-        """, (p["id"], p["celex"], p["paragraph_number"], p["section"], p["seq"],
-              p["text"], embeddings.get(idx), FTS_CONFIG, p["text"]))
-    conn.commit()
+    # Batched executemany — one round-trip per ~500 rows instead of per row
+    # (31k individual INSERTs over the pooler is network-bound and slow).
+    insert_sql = """
+        INSERT INTO paragraphs_v2 (id,celex,paragraph_number,section,seq,text,embedding,search_vector)
+        VALUES (%s,%s,%s,%s,%s,%s,%s, to_tsvector(%s::regconfig, coalesce(%s,'')))
+        ON CONFLICT (id) DO NOTHING
+    """
+    PB = 500
+    params = [
+        (p["id"], p["celex"], p["paragraph_number"], p["section"], p["seq"],
+         p["text"], embeddings.get(idx), FTS_CONFIG, p["text"])
+        for idx, p in enumerate(rows_par)
+    ]
+    for s in range(0, len(params), PB):
+        cur.executemany(insert_sql, params[s:s + PB])
+        conn.commit()
+        if s % 5000 == 0:
+            print(f"  wrote {min(s + PB, len(params))}/{len(params)} paragraphs", flush=True)
     cur.execute("SELECT count(*) FROM decisions_v2"); d = cur.fetchone()[0]
     cur.execute("SELECT count(*) FROM paragraphs_v2"); pg = cur.fetchone()[0]
     print(f"decisions_v2={d}  paragraphs_v2={pg}")
