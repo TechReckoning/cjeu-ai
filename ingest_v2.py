@@ -111,14 +111,20 @@ def fetch_metadata(celex):
 # EUR-Lex HTML — fetch + era-aware paragraph parse (promoted from prototype)
 # --------------------------------------------------------------------------- #
 def has_english_expression(celex):
-    """True if an ENG expression exists (text published in English). Recent
-    judgments appear in CELLAR metadata before their text manifestations land,
-    so the EUR-Lex EN page 404s — we skip those (status='no_english_text')."""
+    """True if an actual English document FILE exists (>=1 ENG item).
+
+    The work-level ENG-expression flag is optimistic: ~6% of judgments have an
+    ENG expression in the metadata but ZERO downloadable ENG items (no English
+    text actually published — French-only/untranslated). Counting items is the
+    accurate predictor — recoverable cases have >=1 item, genuine non-losses 0.
+    """
     q = f'''PREFIX cdm: <http://publications.europa.eu/ontology/cdm#>
     ASK {{
       ?w cdm:resource_legal_id_celex "{celex}"{XSD_STR} .
       ?e cdm:expression_belongs_to_work ?w .
       ?e cdm:expression_uses_language <http://publications.europa.eu/resource/authority/language/ENG> .
+      ?m cdm:manifestation_manifests_expression ?e .
+      ?item cdm:item_belongs_to_manifestation ?m .
     }}'''
     data = urllib.parse.urlencode({"query": q, "format": "application/sparql-results+json"}).encode()
     req = urllib.request.Request(SPARQL, data=data, headers=HEADERS)
@@ -126,17 +132,10 @@ def has_english_expression(celex):
         return json.load(r).get("boolean", False)
 
 
-def fetch_html(celex, timeout=90):
-    """Fetch the ENG judgment document from the Publications Office content-
-    negotiation API (the machine-access path), NOT the eur-lex.europa.eu web UI.
-
-    The web UI returns HTTP 202 / empty bodies under sustained scraping (anti-bot
-    throttling); the cellar resource API serves the structured XHTML reliably and
-    is the intended programmatic source. Returns "" on 404 (no ENG document).
-    """
+def _fetch_celex(celex, accept, timeout):
     url = f"http://publications.europa.eu/resource/celex/{celex}"
     req = urllib.request.Request(
-        url, headers={**HEADERS, "Accept": "application/xhtml+xml", "Accept-Language": "eng"}
+        url, headers={**HEADERS, "Accept": accept, "Accept-Language": "eng"}
     )
     try:
         with urllib.request.urlopen(req, timeout=timeout) as r:
@@ -145,6 +144,20 @@ def fetch_html(celex, timeout=90):
         if e.code in (404, 406):
             return ""
         raise
+
+
+def fetch_html(celex, timeout=90):
+    """Fetch the ENG judgment document from the Publications Office content-
+    negotiation API (the machine path, not the throttled eur-lex.europa.eu UI).
+
+    Primary format is structured XHTML; ~5% of judgments 404 for xhtml but serve
+    as plain HTML, so fall back to Accept: text/html. The parser handles both
+    layouts. Returns "" only when neither format yields a document.
+    """
+    doc = _fetch_celex(celex, "application/xhtml+xml", timeout)
+    if doc.strip():
+        return doc
+    return _fetch_celex(celex, "text/html", timeout)   # HTML fallback
 
 
 def fetch_title(celex, timeout=60):
@@ -201,12 +214,17 @@ def _section_at(pos, bnds):
     return label
 
 
+# Paragraph anchors appear as id="pointN" (structured XHTML) or NAME="pointN"
+# (the plain-HTML fallback layout), with paragraph text following the anchor.
+_POINT_ANCHOR = re.compile(r'(?:id|name)="point(\d+)"', re.I)
+
+
 def parse_paragraphs(html):
     """Return list of (paragraph_number, section, text). Era-aware."""
     bnds = _boundaries(html)
     paras = []
-    if re.search(r'id="point\d+"', html):                 # modern: point anchors
-        anchors = list(re.finditer(r'id="point(\d+)"', html))
+    if _POINT_ANCHOR.search(html):                        # modern: point anchors
+        anchors = list(_POINT_ANCHOR.finditer(html))
         for i, m in enumerate(anchors):
             seg = html[m.end(): anchors[i+1].start() if i+1 < len(anchors) else len(html)]
             t = _strip(seg).lstrip(">").strip()
