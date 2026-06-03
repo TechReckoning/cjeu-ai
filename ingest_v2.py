@@ -22,6 +22,7 @@ import time
 import json
 import urllib.parse
 import urllib.request
+import urllib.error
 
 SPARQL = "https://publications.europa.eu/webapi/rdf/sparql"
 XSD_STR = "^^<http://www.w3.org/2001/XMLSchema#string>"
@@ -126,15 +127,51 @@ def has_english_expression(celex):
 
 
 def fetch_html(celex, timeout=90):
-    url = f"https://eur-lex.europa.eu/legal-content/EN/TXT/?uri=CELEX:{celex}"
-    req = urllib.request.Request(url, headers=HEADERS)
+    """Fetch the ENG judgment document from the Publications Office content-
+    negotiation API (the machine-access path), NOT the eur-lex.europa.eu web UI.
+
+    The web UI returns HTTP 202 / empty bodies under sustained scraping (anti-bot
+    throttling); the cellar resource API serves the structured XHTML reliably and
+    is the intended programmatic source. Returns "" on 404 (no ENG document).
+    """
+    url = f"http://publications.europa.eu/resource/celex/{celex}"
+    req = urllib.request.Request(
+        url, headers={**HEADERS, "Accept": "application/xhtml+xml", "Accept-Language": "eng"}
+    )
     try:
         with urllib.request.urlopen(req, timeout=timeout) as r:
             return r.read().decode("utf-8", errors="ignore")
     except urllib.error.HTTPError as e:
-        if e.code == 404:
+        if e.code in (404, 406):
             return ""
         raise
+
+
+def fetch_title(celex, timeout=60):
+    """Case title via SPARQL cdm:expression_title (ENG expression). Fields are
+    '#'-separated: 'Judgment ... of <date>.#<PARTIES>.#<Request...>#Case C-x/yy.'
+    Returns (title, parties)."""
+    q = f'''PREFIX cdm: <http://publications.europa.eu/ontology/cdm#>
+    SELECT ?title WHERE {{
+      ?w cdm:resource_legal_id_celex "{celex}"{XSD_STR} .
+      ?e cdm:expression_belongs_to_work ?w .
+      ?e cdm:expression_uses_language <http://publications.europa.eu/resource/authority/language/ENG> .
+      ?e cdm:expression_title ?title .
+    }} LIMIT 1'''
+    rows = sparql(q, timeout=timeout)
+    if not rows:
+        return None, []
+    raw = rows[0]["title"]["value"]
+    title = raw.replace("#", " ").strip()
+    parties = []
+    fields = [f.strip() for f in raw.split("#") if f.strip()]
+    if len(fields) >= 2:
+        # second field is the party line ("SIA 'Oribalt Riga v Valsts ...")
+        party_line = re.sub(r'\.$', '', fields[1])
+        parts = re.split(r'\s+v\.?\s+', party_line)
+        if len(parts) >= 2:
+            parties = [p.strip(" ,.‘’'") for p in parts if p.strip()]
+    return title, parties
 
 
 _SECTION_MARKERS = [
@@ -203,10 +240,10 @@ def parse_title(html):
 
 
 def classify_fetch(html, paras):
-    if not html or len(html) < 5000:
-        return "error"
-    if not paras and "Need help?" in html and "Grounds" not in html:
-        return "placeholder"
+    if not html:
+        return "error"            # 404/406/empty from the API
+    if not paras:
+        return "no_paragraphs"    # fetched a doc but parser found nothing (inspect)
     return "ok"
 
 
@@ -264,7 +301,10 @@ def main():
             print(f"  [{celex}] html error: {e}", flush=True)
             html = ""
         paras = parse_paragraphs(html)
-        title, parties = parse_title(html)
+        try:
+            title, parties = fetch_title(celex)
+        except Exception:
+            title, parties = None, []
         fetch_status = classify_fetch(html, paras)
         stats["fetch_ok" if fetch_status == "ok" else "fetch_bad"] += 1
         if not title:
