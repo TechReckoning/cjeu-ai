@@ -1,0 +1,12 @@
+{
+  "id": "011_same_sex_marriage_residence_coman",
+  "question": "Does a third-country national of the same sex as a Union citizen, whose marriage to that Union citizen was concluded in a Member State in accordance with the law of that Member State, have a right of residence for a period exceeding three months in the territory of the Member State of which the Union citizen is a national?",
+  "topic": "Citizenship of the Union — freedom of movement — derived right of residence of a same-sex spouse (Art. 21(1) TFEU, Directive 2004/38)",
+  "expected": [
+    {"celex": "62016CJ0673", "name": "Coman", "paragraphs": []}
+  ],
+  "corpus_gap": true,
+  "gold_answer": "Yes. Article 21(1) TFEU means that a third-country national of the same sex as a Union citizen, whose marriage to that citizen was concluded in a Member State in accordance with that State's law, has a derived right to reside for more than three months in the Member State of which the Union citizen is a national. That right cannot be made subject to stricter conditions than those in Article 7 of Directive 2004/38 (Coman, C-673/16).",
+  "source": "Expert legal memo provided 2026-06-02 (verification batch)",
+  "notes": "corpus_gap: Coman (C-673/16, Grand Chamber, decided 2018 but CELEX year 2016) is ABSENT from BOTH cjeu_paragraphs and paragraphs_v2 today. It exists in CELLAR with English text and is in the 2016 JUDG list, so the v2 backfill of year 2016 should capture it — a forward test that the rebuild closes coverage gaps. Memo quotes the operative part rather than pinning grounds paragraphs, so paragraphs is left empty."
+}

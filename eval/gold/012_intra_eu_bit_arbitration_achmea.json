@@ -1,0 +1,12 @@
+{
+  "id": "012_intra_eu_bit_arbitration_achmea",
+  "question": "Are the provisions of a bilateral investment treaty concluded between two Member States, which confer jurisdiction to resolve investor-State disputes upon an arbitral tribunal that is not part of the EU judicial system, compatible with EU law?",
+  "topic": "Autonomy of EU law — intra-EU bilateral investment treaty — investor-State arbitration (Arts 267 and 344 TFEU)",
+  "expected": [
+    {"celex": "62016CJ0284", "name": "Achmea", "paragraphs": [58, 59, 60]}
+  ],
+  "corpus_gap": true,
+  "gold_answer": "No. Articles 267 and 344 TFEU preclude a provision in an agreement between Member States (such as Article 8 of the BIT) under which an investor of one Member State may, in a dispute concerning investments in the other, bring proceedings against that State before an arbitral tribunal whose jurisdiction it has undertaken to accept. Such a clause removes disputes that may concern the interpretation/application of EU law from the EU judicial system, undermines mutual trust and the preliminary-ruling procedure (Art. 267 TFEU), and adversely affects the autonomy of EU law (Achmea, C-284/16, paras 58-60).",
+  "source": "Expert legal memo provided 2026-06-02 (verification batch)",
+  "notes": "corpus_gap: Achmea (C-284/16, Grand Chamber, decided 2018 but CELEX year 2016) is ABSENT from BOTH corpora today; exists in CELLAR with English text, in the 2016 JUDG list. Gold paragraphs 58-60. The v2 backfill of year 2016 should capture it."
+}
