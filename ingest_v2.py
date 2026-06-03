@@ -8,11 +8,17 @@ parse title/parties, embed paragraphs, write decisions_v2 + paragraphs_v2.
 Judgments only (JUDG). Idempotent per CELEX. Per-year orchestration with a
 validation gate. Builds alongside the live tables; touches nothing existing.
 
+Resumable: fetched documents are cached on disk (CJEU_V2_CACHE), and decisions
+already in decisions_v2 are skipped (unless --force), so an interrupted backfill
+restarts cheaply without re-fetching or redoing work.
+
 Usage:
     python ingest_v2.py --year 2026 --dry-run        # fetch+parse+validate, NO writes, NO embedding
     python ingest_v2.py --year 2026 --no-embed       # write rows, skip embeddings (cheap)
     python ingest_v2.py --year 2026                  # full: write + embed
     python ingest_v2.py --year 2026 --limit 20 --dry-run
+    python ingest_v2.py --year 2026 --force          # re-ingest even if already present
+    python ingest_v2.py --year 2026 --no-cache       # bypass the on-disk fetch cache
 """
 
 import os
@@ -29,6 +35,16 @@ XSD_STR = "^^<http://www.w3.org/2001/XMLSchema#string>"
 EMBED_MODEL = "text-embedding-3-small"
 FTS_CONFIG = "english"
 HEADERS = {"User-Agent": "Amicus-research/1.0"}
+
+# On-disk cache of fetched judgment documents, so re-runs don't re-hit the API
+# (a 70-year backfill must be resumable and not re-fetch). One file per CELEX:
+# the raw document, or an empty file meaning "fetched, no English document".
+CACHE_DIR = os.path.expanduser(os.getenv("CJEU_V2_CACHE", "~/.cjeu-py/data/v2_html_cache"))
+NO_CACHE = "--no-cache" in sys.argv
+
+
+def _cache_path(celex):
+    return os.path.join(CACHE_DIR, f"{celex}.html")
 
 
 # --------------------------------------------------------------------------- #
@@ -153,11 +169,23 @@ def fetch_html(celex, timeout=90):
     Primary format is structured XHTML; ~5% of judgments 404 for xhtml but serve
     as plain HTML, so fall back to Accept: text/html. The parser handles both
     layouts. Returns "" only when neither format yields a document.
+
+    Cached on disk per CELEX (unless --no-cache): a cache hit avoids the network
+    entirely, making re-runs free and the backfill resumable. An empty cache file
+    records a confirmed "no English document".
     """
+    path = _cache_path(celex)
+    if not NO_CACHE and os.path.exists(path):
+        with open(path, encoding="utf-8", errors="ignore") as f:
+            return f.read()
     doc = _fetch_celex(celex, "application/xhtml+xml", timeout)
-    if doc.strip():
-        return doc
-    return _fetch_celex(celex, "text/html", timeout)   # HTML fallback
+    if not doc.strip():
+        doc = _fetch_celex(celex, "text/html", timeout)   # HTML fallback
+    if not NO_CACHE:
+        os.makedirs(CACHE_DIR, exist_ok=True)
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(doc)
+    return doc
 
 
 def fetch_title(celex, timeout=60):
@@ -281,10 +309,31 @@ def main():
           f"{'DRY RUN (no writes, no embed)' if dry_run else ('no-embed' if no_embed else 'FULL')} ===",
           flush=True)
 
+    force = "--force" in args
     celexes = list_year_judgments(year)
     if limit:
         celexes = celexes[:limit]
     print(f"JUDG decisions in {year}: {len(celexes)}", flush=True)
+
+    # Resume: skip CELEXes already written to decisions_v2 (unless --force or a
+    # dry-run). Makes an interrupted backfill resumable without redoing work.
+    if not dry_run and not force:
+        try:
+            import psycopg as _pg
+            from dotenv import load_dotenv as _ld
+            _ld()
+            _c = _pg.connect(os.getenv("DATABASE_URL"), prepare_threshold=None,
+                             connect_timeout=20)
+            done = {r[0] for r in _c.execute(
+                "SELECT celex FROM decisions_v2 WHERE celex = ANY(%s)", (celexes,)
+            ).fetchall()}
+            _c.close()
+            if done:
+                celexes = [c for c in celexes if c not in done]
+                print(f"  resume: {len(done)} already ingested, {len(celexes)} remaining",
+                      flush=True)
+        except Exception as e:
+            print(f"  (resume check skipped: {e})", flush=True)
 
     stats = {"decisions": 0, "paragraphs": 0, "fetch_ok": 0, "fetch_bad": 0,
              "nonmonotonic": 0, "no_title": 0, "with_meta": 0}
