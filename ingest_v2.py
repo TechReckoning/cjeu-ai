@@ -215,10 +215,18 @@ def fetch_title(celex, timeout=60):
     return title, parties
 
 
+# Section dividers. Two template families:
+#  - anchor-based: name="SM"/"MO"/"CO" or <h2>Summary/Grounds/Operative part</h2>
+#  - CSS-class-based (2008-era and similar): the operative summary appears FIRST
+#    (its own point1..N), then class "C75Debutdesmotifs" ("début des motifs" =
+#    start of grounds) begins the grounds (which restart at point1). Without the
+#    grounds divider, the two point sequences merge -> duplicate/non-monotonic
+#    numbering. The summary block before C75 is tagged 'summary'.
 _SECTION_MARKERS = [
     (re.compile(r'name="SM"|>\s*Summary\s*<', re.I), "summary"),
-    (re.compile(r'name="MO"|>\s*Grounds\s*<', re.I), "grounds"),
-    (re.compile(r'name="CO"|>\s*Operative part\s*<', re.I), "operative"),
+    (re.compile(r'class="C\d*Sommaire', re.I), "summary"),
+    (re.compile(r'name="MO"|>\s*Grounds\s*<|class="C75Debutdesmotifs"', re.I), "grounds"),
+    (re.compile(r'name="CO"|>\s*Operative part\s*<|class="C\d*DispositifIntroduction', re.I), "operative"),
 ]
 
 
@@ -235,11 +243,18 @@ def _boundaries(html):
 
 
 def _section_at(pos, bnds):
-    label, best = "grounds", -1
+    # Nearest section boundary at or before pos.
+    label, best = None, -1
     for mp, lab in bnds:
         if mp <= pos and mp > best:
             best, label = mp, lab
-    return label
+    if label is not None:
+        return label
+    # No boundary precedes pos. If boundaries exist later (e.g. a C75 grounds
+    # divider), this is pre-grounds content -> 'summary' (so the operative
+    # summary's point1..N don't merge with the grounds' point1..N). With NO
+    # boundaries at all (modern docs), point1 is the grounds -> default 'grounds'.
+    return "summary" if bnds else "grounds"
 
 
 # Paragraph anchors appear as id="pointN" (structured XHTML) or NAME="pointN"
