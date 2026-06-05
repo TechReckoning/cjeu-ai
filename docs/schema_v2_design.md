@@ -144,3 +144,42 @@ cases before hitting the hard old ones.
 - Ingestion discovery filters to `JUDG` only.
 - A per-year `validate_year()` step gates progression (logs a report; halts on
   anomalies above a threshold).
+
+---
+
+## Backfill status & KNOWN ISSUE (older-era parsing) — 2026-06-04
+
+**Done & clean: 2008–2026.** Modern (id-anchor) and 2008-era (name-anchor + C75
+summary/grounds) templates parse correctly. The C75 section fix resolved the
+2009 non-monotonic explosion (170 -> 3). decisions_v2 spans 1993–2026,
+~11,419 decisions / ~616k paragraphs, 100% embedded.
+
+**OPEN ISSUE — pre-2008 text extraction.** The backfill 2007->1954 was PAUSED at
+~1992 because two older HTML templates are not yet handled well:
+- **2001–2007 "S-class" / mixed template**: summaries use `class="S35MotClenumerote"`
+  / `S01PointAltN`; grounds use inconsistent markup (some `<p style="text-indent">N text`,
+  many classless `<p>`), varying within a single document. Current parser SILENTLY
+  skips docs it can't match -> **~1,369 decisions (1993–2007) have ZERO paragraphs**
+  in the DB (metadata is fine; only the paragraph text is missing).
+- **1992–2000 "inline" template** (`<p>N. TEXT`): mostly parses (avg ~48–62 paras)
+  but has high non-monotonic numbering (summary+grounds both numbered from 1; the
+  C75 divider isn't present in this template, so the summary/grounds split fix
+  doesn't apply).
+
+**Template census (paragraph-marker by year)** is in the session notes; key point:
+2011+ = id-anchor; 2008–2010 = name-anchor; 2001–2007 = S-class/mixed/none;
+1992–2000 = inline.
+
+**A cleaner source exists: Formex XML (`fmx4`)** is available for these years —
+CELLAR's structured legal XML with explicit, consistent paragraph tags. Fetching
+the Formex *document body* needs an extra SPARQL hop (manifestation -> item URL),
+then a Formex parser. This is the likely-robust fix for 2001–2007 (HTML there is
+too inconsistent to parse reliably) and possibly a better primary source overall.
+
+**DECISION DEFERRED** (user): how to extract the older eras — options on the table:
+(1) Formex for 2001–2007 + keep HTML inline for 1992–2000; (2) Formex for all
+pre-2008; (3) keep patching HTML (fragile); (4) ship modern era, defer rest.
+The modern corpus (2008–2026) is clean and usable now regardless.
+
+**To resume the older-era work:** decide the approach above, then re-ingest the
+affected years with `--force` (fetches are cached, so cheap) and re-embed.
