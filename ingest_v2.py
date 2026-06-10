@@ -29,6 +29,7 @@ import json
 import urllib.parse
 import urllib.request
 import urllib.error
+import xml.etree.ElementTree as ET
 
 SPARQL = "https://publications.europa.eu/webapi/rdf/sparql"
 XSD_STR = "^^<http://www.w3.org/2001/XMLSchema#string>"
@@ -281,6 +282,69 @@ def parse_paragraphs(html):
     return paras
 
 
+# --------------------------------------------------------------------------- #
+# Formex (fmx4) — structured-XML fallback for older eras whose HTML is too
+# inconsistent to parse (2001-2007 S-class/mixed; some pre-2000). Grounds are
+# <NP><NO.P>N</NO.P><TXT>..</TXT></NP>; quoted material in QUOT.S blocks is
+# skipped so its internal numbering doesn't pollute the judgment's sequence.
+# See prototype_formex.py for the standalone validation.
+# --------------------------------------------------------------------------- #
+def formex_doc_url(celex):
+    """ENG Formex document URL for a CELEX, or None if no ENG fmx4 exists."""
+    q = f'''PREFIX cdm: <http://publications.europa.eu/ontology/cdm#>
+    SELECT ?m ?mt WHERE {{
+      ?w cdm:resource_legal_id_celex "{celex}"{XSD_STR} .
+      ?e cdm:expression_belongs_to_work ?w .
+      ?e cdm:expression_uses_language <http://publications.europa.eu/resource/authority/language/ENG> .
+      ?m cdm:manifestation_manifests_expression ?e . ?m cdm:manifestation_type ?mt .
+    }}'''
+    for r in sparql(q):
+        if r["mt"]["value"] == "fmx4":
+            return r["m"]["value"] + "/DOC_1"
+    return None
+
+
+def parse_formex(xml):
+    """Return [(paragraph_number, section, text)] from a Formex judgment.
+    section is 'grounds' (Formex separates the summary structurally; numbered NP
+    are the grounds)."""
+    root = ET.fromstring(xml)
+    parents = {c: p for p in root.iter() for c in p}
+
+    def in_quote(el):
+        cur = parents.get(el)
+        while cur is not None:
+            if cur.tag in ("QUOT.S", "QUOT.START"):
+                return True
+            cur = parents.get(cur)
+        return False
+
+    out = []
+    for np in root.iter("NP"):
+        if in_quote(np):
+            continue
+        nop, txt = np.find("NO.P"), np.find("TXT")
+        if nop is not None and txt is not None and (nop.text or "").strip().isdigit():
+            text = re.sub(r"\s+", " ", " ".join(txt.itertext())).strip()
+            if text:
+                out.append((int(nop.text), "grounds", text))
+    return out
+
+
+def fetch_formex_paragraphs(celex, timeout=90):
+    """Resolve + fetch the ENG Formex doc and parse it. Returns [] on any miss."""
+    try:
+        url = formex_doc_url(celex)
+        if not url:
+            return []
+        req = urllib.request.Request(url, headers=HEADERS)
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            xml = r.read().decode("utf-8", errors="ignore")
+        return parse_formex(xml)
+    except Exception:
+        return []
+
+
 def parse_title(html):
     """Extract the case title from EUR-Lex HTML (<p id="title">) and derive
     parties. Title format: "Judgment of the Court (...) of <date>. <PARTIES>.
@@ -383,12 +447,31 @@ def main():
             print(f"  [{celex}] html error: {e}", flush=True)
             html = ""
         paras = parse_paragraphs(html)
+        source = "html"
+
+        # Formex fallback: HTML for the older eras (2001-2007 esp.) is too
+        # inconsistent — it yields 0 paragraphs or a non-monotonic mess. When that
+        # happens, fetch the structured Formex (fmx4) and use it if it is better
+        # (more paragraphs and monotonic grounds).
+        html_g = [n for n, s, _ in paras if s == "grounds"]
+        html_mono = html_g == sorted(html_g)
+        html_bad = (not paras) or (not html_mono)
+        if html_bad:
+            fx = fetch_formex_paragraphs(celex)
+            fx_g = [n for n, s, _ in fx]
+            fx_mono = fx_g == sorted(fx_g)
+            # Prefer Formex when it is monotonic and either HTML produced nothing,
+            # HTML grounds were non-monotonic, or Formex has at least as many paras.
+            if fx and fx_mono and (not paras or not html_mono or len(fx) >= len(paras)):
+                paras, source = fx, "formex"
+
         try:
             title, parties = fetch_title(celex)
         except Exception:
             title, parties = None, []
-        fetch_status = classify_fetch(html, paras)
+        fetch_status = "ok" if paras else classify_fetch(html, paras)
         stats["fetch_ok" if fetch_status == "ok" else "fetch_bad"] += 1
+        stats[f"src_{source}"] = stats.get(f"src_{source}", 0) + 1
         if not title:
             stats["no_title"] += 1
 
