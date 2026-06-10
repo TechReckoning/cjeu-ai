@@ -183,3 +183,31 @@ The modern corpus (2008–2026) is clean and usable now regardless.
 
 **To resume the older-era work:** decide the approach above, then re-ingest the
 affected years with `--force` (fetches are cached, so cheap) and re-embed.
+
+---
+
+## Older-era rebuild COMPLETE (1993-2007) via Formex — 2026-06-04
+
+The pre-2008 parsing problem is SOLVED. A Formex (fmx4) fallback was wired into
+ingest_v2 (HTML-first; when HTML yields 0 paragraphs or non-monotonic grounds,
+fetch structured Formex XML and use it if its grounds are monotonic). Modern
+years keep using HTML (no Formex calls, no regression).
+
+Re-ingested 1993-2007 with --force. Validation (non-monotonic before -> after,
+avg paras before -> after):
+- 2002: 1.9 -> 50.3 paras/dec (26x!), nonmono 0   [worst S-class year]
+- 2001: 6.7 -> 56.5, nonmono 0
+- 2003: 14.9 -> 53.3, nonmono 1
+- 2000: 33 -> 58.1, nonmono 1 (was 103)
+- 1998: -> 53.4, nonmono 3 (was 186)
+- 1994: -> 47.2, nonmono 2 (was 60; needed a targeted re-run after transient
+  Formex-fetch failures during the batch)
+- All other years 1995-2007: nonmono <=5, avg paras ~43-59
+- 2007: keeps ~54 nonmono — NO Formex coverage there; residual quoted-legislation
+  edge case in HTML. Acceptable (data complete, avg 51.7).
+
+Net: paragraphs_v2 grew ~616k -> ~669k (the broken HTML parser had silently
+DROPPED ~53k paragraphs that Formex recovered). v2 now cleanly covers 1993-2026
+(~11,419 decisions), fully embedded.
+
+LAST REMAINING PIECE: the 1992 -> 1954 ALL-CAPS era backfill (not yet started).
