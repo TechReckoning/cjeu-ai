@@ -54,6 +54,13 @@ K_RRF = 60                       # standard RRF damping constant
 RERANK_POOL = 50                 # how many fused candidates to send to the reranker
 HNSW_EF_SEARCH = 100             # recall/latency knob for the HNSW vector index
 
+# CORPUS SELECTOR — reversible cutover switch. "v2" = the rebuilt 1954-2026 corpus
+# (paragraphs_v2/decisions_v2, section-aware: grounds+operative). "legacy" = the
+# original cjeu_paragraphs. Flip back to "legacy" for an instant code-only
+# rollback; both corpora remain in the database untouched.
+CORPUS = os.getenv("AMICUS_CORPUS", "v2")
+V2_SECTIONS = ("grounds", "operative")   # section-aware retrieval (excludes summary/catchwords)
+
 
 # --------------------------------------------------------------------------- #
 # Database access — pooled, with graceful fallback to the original behaviour
@@ -152,12 +159,13 @@ def db():
 @st.cache_data(ttl=3600)
 def get_corpus_stats():
     """Live corpus counts, cached for an hour so the UI figures stay truthful."""
+    table = "paragraphs_v2" if CORPUS == "v2" else "cjeu_paragraphs"
     try:
         with db() as conn:
             with conn.cursor() as cur:
                 cur.execute(
-                    "SELECT count(*) AS paragraphs, "
-                    "count(DISTINCT celex) AS decisions FROM cjeu_paragraphs;"
+                    f"SELECT count(*) AS paragraphs, "
+                    f"count(DISTINCT celex) AS decisions FROM {table};"
                 )
                 paragraphs, decisions = cur.fetchone()
         return decisions, paragraphs
@@ -332,23 +340,55 @@ Return only the standalone question. No markdown.
             )
             query_embedding = embedding_response.data[0].embedding
 
+            # Corpus-aware retrieval SQL. v2: query paragraphs_v2 restricted to
+            # grounds+operative (section-aware — the clean fix for the headnote
+            # problem); url is derived (decisions_v2 has it, but the EUR-Lex link
+            # is reconstructed from CELEX below anyway). legacy: original
+            # cjeu_paragraphs. Both return the same column shape so the row
+            # handling stays identical.
+            if CORPUS == "v2":
+                vector_sql = """
+                    SELECT id, celex, NULL::text AS url, paragraph_number, seq AS paragraph_index, text,
+                           1 - (embedding <=> %s::vector) AS vector_score, 0::float AS keyword_score
+                    FROM paragraphs_v2
+                    WHERE embedding IS NOT NULL AND section = ANY(%s)
+                    ORDER BY embedding <=> %s::vector LIMIT %s;
+                """
+                vector_params = (query_embedding, list(V2_SECTIONS), query_embedding, candidate_limit)
+                keyword_sql = """
+                    SELECT id, celex, NULL::text AS url, paragraph_number, seq AS paragraph_index, text,
+                           0::float AS vector_score,
+                           ts_rank_cd(search_vector, websearch_to_tsquery(%s::regconfig, %s)) AS keyword_score
+                    FROM paragraphs_v2
+                    WHERE section = ANY(%s) AND search_vector @@ websearch_to_tsquery(%s::regconfig, %s)
+                    ORDER BY keyword_score DESC LIMIT %s;
+                """
+                keyword_params = (FTS_CONFIG, retrieval_question, list(V2_SECTIONS),
+                                  FTS_CONFIG, retrieval_question, candidate_limit)
+            else:
+                vector_sql = """
+                    SELECT id, celex, url, paragraph_number, paragraph_index, text,
+                           1 - (embedding <=> %s::vector) AS vector_score, 0::float AS keyword_score
+                    FROM cjeu_paragraphs ORDER BY embedding <=> %s::vector LIMIT %s;
+                """
+                vector_params = (query_embedding, query_embedding, candidate_limit)
+                keyword_sql = """
+                    SELECT id, celex, url, paragraph_number, paragraph_index, text,
+                           0::float AS vector_score,
+                           ts_rank_cd(search_vector, websearch_to_tsquery(%s::regconfig, %s)) AS keyword_score
+                    FROM cjeu_paragraphs
+                    WHERE search_vector @@ websearch_to_tsquery(%s::regconfig, %s)
+                    ORDER BY keyword_score DESC LIMIT %s;
+                """
+                keyword_params = (FTS_CONFIG, retrieval_question,
+                                  FTS_CONFIG, retrieval_question, candidate_limit)
+
             results = {}
             with db() as conn:
                 with conn.cursor() as cur:
                     # Vector arm — fetch order == vector rank
                     cur.execute(f"SET LOCAL hnsw.ef_search = {int(HNSW_EF_SEARCH)};")
-                    cur.execute(
-                        """
-                        SELECT
-                            id, celex, url, paragraph_number, paragraph_index, text,
-                            1 - (embedding <=> %s::vector) AS vector_score,
-                            0::float AS keyword_score
-                        FROM cjeu_paragraphs
-                        ORDER BY embedding <=> %s::vector
-                        LIMIT %s;
-                        """,
-                        (query_embedding, query_embedding, candidate_limit),
-                    )
+                    cur.execute(vector_sql, vector_params)
                     for rank, row in enumerate(cur.fetchall(), start=1):
                         (row_id, celex, url, paragraph_number,
                          paragraph_index, text, vector_score, keyword_score) = row
@@ -368,21 +408,7 @@ Return only the standalone question. No markdown.
 
                     # Keyword arm — fetch order == keyword rank
                     # websearch_to_tsquery: supports OR/phrases (plainto AND-ed everything)
-                    cur.execute(
-                        """
-                        SELECT
-                            id, celex, url, paragraph_number, paragraph_index, text,
-                            0::float AS vector_score,
-                            ts_rank_cd(search_vector,
-                                       websearch_to_tsquery(%s::regconfig, %s)) AS keyword_score
-                        FROM cjeu_paragraphs
-                        WHERE search_vector @@ websearch_to_tsquery(%s::regconfig, %s)
-                        ORDER BY keyword_score DESC
-                        LIMIT %s;
-                        """,
-                        (FTS_CONFIG, retrieval_question,
-                         FTS_CONFIG, retrieval_question, candidate_limit),
-                    )
+                    cur.execute(keyword_sql, keyword_params)
                     for rank, row in enumerate(cur.fetchall(), start=1):
                         (row_id, celex, url, paragraph_number,
                          paragraph_index, text, vector_score, keyword_score) = row
