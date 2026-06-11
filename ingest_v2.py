@@ -235,8 +235,26 @@ def _strip(s):
     return re.sub(r"\s+", " ", re.sub(r"<[^>]+>", " ", s)).strip()
 
 
+# The name="SM/MO/CO" anchors are the reliable section markers (one per section,
+# at the real positions). The text headings (>Summary<, >Grounds<, >Operative
+# part<) and class markers are noisier — in older docs the headings ALSO appear
+# in a table-of-contents near the top, creating spurious early boundaries. So:
+# prefer the anchors when present; only fall back to text/class markers otherwise.
+_ANCHOR_MARKERS = [
+    (re.compile(r'name="SM"', re.I), "summary"),
+    (re.compile(r'name="MO"', re.I), "grounds"),
+    (re.compile(r'name="CO"', re.I), "operative"),
+]
+
+
 def _boundaries(html):
-    out = []
+    anchors = []
+    for rx, lab in _ANCHOR_MARKERS:
+        for m in rx.finditer(html):
+            anchors.append((m.start(), lab))
+    if anchors:
+        return sorted(anchors)
+    out = []                                   # no anchors -> text/class markers
     for rx, lab in _SECTION_MARKERS:
         for m in rx.finditer(html):
             out.append((m.start(), lab))
@@ -263,8 +281,31 @@ def _section_at(pos, bnds):
 _POINT_ANCHOR = re.compile(r'(?:id|name)="point(\d+)"', re.I)
 
 
+def parse_prose(html):
+    """ECSC/early-CJEU era (≈1954-1969): grounds are UNNUMBERED prose. Capture
+    every substantial <p> block, sequentially numbered PER SECTION (summary /
+    grounds / operative). Skips short fragments and pure section headers.
+    """
+    bnds = _boundaries(html)
+    counters = {}
+    paras = []
+    for m in re.finditer(r"<p\b[^>]*>(.*?)</p>", html, re.S | re.I):
+        t = _strip(m.group(1))
+        if len(t) < 40:                       # skip headers/fragments (e.g. "P.1078", "I - ...")
+            continue
+        sec = _section_at(m.start(), bnds)
+        counters[sec] = counters.get(sec, 0) + 1
+        paras.append((counters[sec], sec, t))
+    return paras
+
+
 def parse_paragraphs(html):
-    """Return list of (paragraph_number, section, text). Era-aware."""
+    """Return list of (paragraph_number, section, text). Era-aware.
+
+    Three layouts: modern point-anchors; old inline-numbered <p>N. TEXT; and the
+    earliest ECSC era (~1954-1969) where grounds are unnumbered prose — detected
+    when the numbered passes find almost nothing but substantial <p> text exists.
+    """
     bnds = _boundaries(html)
     paras = []
     if _POINT_ANCHOR.search(html):                        # modern: point anchors
@@ -279,6 +320,19 @@ def parse_paragraphs(html):
             t = _strip(m.group(2))
             if len(t) >= 20:
                 paras.append((int(m.group(1)), _section_at(m.start(), bnds), t))
+
+    # Prose fallback for the earliest era (~1954-1969): grounds are unnumbered
+    # (or mixed numbered+unnumbered) prose, so the numbered passes capture only a
+    # fraction. The prose parser captures every substantial <p> (a superset), so
+    # when it finds materially more grounds paragraphs, prefer it. Guarded so it
+    # never overrides the clean modern/numbered eras (where the numbered pass
+    # already captures essentially everything, leaving little for prose to add).
+    grounds_paras = [p for p in paras if p[1] == "grounds"]
+    if not _POINT_ANCHOR.search(html):        # never override anchor-based docs
+        prose = parse_prose(html)
+        prose_grounds = [p for p in prose if p[1] == "grounds"]
+        if len(prose_grounds) >= len(grounds_paras) + 3:
+            paras = prose
     return paras
 
 
