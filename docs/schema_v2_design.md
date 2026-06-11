@@ -211,3 +211,33 @@ DROPPED ~53k paragraphs that Formex recovered). v2 now cleanly covers 1993-2026
 (~11,419 decisions), fully embedded.
 
 LAST REMAINING PIECE: the 1992 -> 1954 ALL-CAPS era backfill (not yet started).
+
+---
+
+## CORPUS REBUILD COMPLETE — full 1954-2026 — 2026-06-11
+
+The v2 ingestion phase is DONE. decisions_v2 = 15,251, paragraphs_v2 = 791,210,
+0 NULL embeddings, year range 1954-2026 — the entire CJEU case law from the
+Court's founding to today, clean/normalized/faceted/embedded.
+
+Parsing by era (all validated, monotonic grounds):
+- 2008-2026: HTML point-anchors.
+- 1993-2007: Formex (fmx4) fallback for the inconsistent S-class/mixed HTML
+  (recovered ~53k paragraphs the old HTML parser had silently dropped).
+- 1970-1992: HTML numbered-grounds (Formex returns in early-80s for extra clean).
+- 1954-1969: NEW prose-grounds parser (parse_prose) — the founding ECSC-era
+  judgments write grounds as unnumbered prose; capture every substantial <p>,
+  numbered per section. Recovered them from ~12% coverage to full (avg 35-125
+  paras/dec). Also fixed _boundaries to prefer name="SM/MO/CO" anchors over
+  text headings (older docs repeat the headings in a top table-of-contents).
+
+Known limitation (logged, no action): pre-1994 paragraph-numbering precision —
+some non-monotonic from quoted-legislation interleaving where Formex coverage
+doesn't reach (text is COMPLETE; retrieval unaffected; it's a citation-pinpoint
+precision gap). A handful of CELEX "(01)" re-publication variants have no separate
+English text (genuine non-losses, status='error').
+
+NEXT MAJOR STEP: measured CUTOVER — point the citation graph + app at _v2 and
+compare against the live cjeu_paragraphs on the gold set before switching. Then
+the faceted-search feature (semantic + full-text + decisions_v2 metadata filters)
+the schema was built for.
