@@ -1,5 +1,5 @@
 """
-AMICUS — Streamlit app (improved)
+CANTEMIA — Streamlit app (improved)
 
 This is a drop-in replacement for app.py. UI text, prompts, models for the
 rewrite/rerank steps, and the overall flow are preserved. The changes are:
@@ -40,7 +40,7 @@ import streamlit as st
 load_dotenv()
 client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
-st.set_page_config(page_title="AMICUS", layout="wide")
+st.set_page_config(page_title="CANTEMIA", layout="wide")
 
 # --------------------------------------------------------------------------- #
 # Configuration (centralised so tuning is a one-line change)
@@ -277,8 +277,8 @@ if st.sidebar.button("Clear Conversation"):
     st.session_state.messages = []
     st.rerun()
 
-st.title("AMICUS")
-st.subheader("Leave the Junior Alone. Ask Amicus.")
+st.title("CANTEMIA")
+st.subheader("Leave the Junior Alone. Ask Cantemia.")
 st.caption(
     "Independent AI-powered legal research across Court of Justice of the European Union case law. "
     "Not affiliated with the CJEU or any EU institution. "
@@ -290,11 +290,11 @@ st.caption("Hybrid semantic + full-text search with GPT reranking over CJEU case
 _decisions, _paragraphs = get_corpus_stats()
 if _decisions and _paragraphs:
     st.info(
-        f"Amicus currently searches across {_decisions:,} CJEU decisions "
+        f"Cantemia currently searches across {_decisions:,} CJEU decisions "
         f"and {_paragraphs:,} indexed case-law paragraphs."
     )
 else:
-    st.info("Amicus searches across CJEU case-law paragraphs.")
+    st.info("Cantemia searches across CJEU case-law paragraphs.")
 
 final_limit = st.sidebar.slider("Final sources", 3, 12, 8)
 candidate_limit = st.sidebar.slider("Candidate pool per method", 20, 80, 40)
@@ -327,7 +327,7 @@ for message in st.session_state.messages:
     with st.chat_message(message["role"]):
         st.markdown(message["content"])
 
-question = st.chat_input("Ask Amicus a legal research question...")
+question = st.chat_input("Ask Cantemia a legal research question...")
 
 # --------------------------------------------------------------------------- #
 # Main pipeline
@@ -646,7 +646,7 @@ Candidates:
             context = "\n\n".join(context_blocks)
 
             answer_prompt = f"""
-You are Amicus, a careful EU law research assistant.
+You are Cantemia, a careful EU law research assistant.
 
 Answer the user's latest message using ONLY the sources below and the recent conversation context.
 If the sources are insufficient, say that the current database is insufficient.
