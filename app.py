@@ -173,6 +173,31 @@ def get_corpus_stats():
         return None, None
 
 
+@st.cache_data(ttl=3600)
+def get_facet_options():
+    """Distinct values for the sidebar facets (subject matter, country), cached.
+    Only meaningful for the v2 corpus (decisions_v2 metadata). Returns ([], [])
+    on legacy or error so the UI simply shows no filters."""
+    if CORPUS != "v2":
+        return [], []
+    try:
+        with db() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT s, count(*) FROM decisions_v2, unnest(subject_matters) s "
+                    "GROUP BY s ORDER BY count(*) DESC;"
+                )
+                subjects = [r[0] for r in cur.fetchall()]
+                cur.execute(
+                    "SELECT country_origin, count(*) FROM decisions_v2 "
+                    "WHERE country_origin IS NOT NULL GROUP BY 1 ORDER BY count(*) DESC;"
+                )
+                countries = [r[0] for r in cur.fetchall()]
+        return subjects, countries
+    except Exception:
+        return [], []
+
+
 def log_query(
     user_question,
     retrieval_question,
@@ -274,6 +299,27 @@ else:
 final_limit = st.sidebar.slider("Final sources", 3, 12, 8)
 candidate_limit = st.sidebar.slider("Candidate pool per method", 20, 80, 40)
 
+# --------------------------------------------------------------------------- #
+# Faceted filters (v2 only) — optional, composable WHERE constraints on the
+# decisions_v2 metadata. Empty = unfiltered (default behaviour unchanged).
+# --------------------------------------------------------------------------- #
+filter_subjects, filter_countries, filter_year_from, filter_year_to = [], [], None, None
+if CORPUS == "v2":
+    _subjects, _countries = get_facet_options()
+    if _subjects or _countries:
+        with st.sidebar.expander("Filters (optional)", expanded=False):
+            st.caption(
+                "Narrow the search by case metadata. Note: a filter excludes "
+                "decisions where that field is missing."
+            )
+            filter_subjects = st.multiselect("Subject matter", _subjects, default=[])
+            filter_countries = st.multiselect("Country of origin (referring State)",
+                                              _countries, default=[])
+            yr = st.slider("Decision year", 1954, 2026, (1954, 2026))
+            # Only treat as an active filter if the user narrowed the full range.
+            if yr != (1954, 2026):
+                filter_year_from, filter_year_to = yr[0], yr[1]
+
 if "messages" not in st.session_state:
     st.session_state.messages = []
 
@@ -347,24 +393,43 @@ Return only the standalone question. No markdown.
             # cjeu_paragraphs. Both return the same column shape so the row
             # handling stays identical.
             if CORPUS == "v2":
-                vector_sql = """
-                    SELECT id, celex, NULL::text AS url, paragraph_number, seq AS paragraph_index, text,
-                           1 - (embedding <=> %s::vector) AS vector_score, 0::float AS keyword_score
-                    FROM paragraphs_v2
-                    WHERE embedding IS NOT NULL AND section = ANY(%s)
-                    ORDER BY embedding <=> %s::vector LIMIT %s;
+                # Optional faceted filters -> extra WHERE clauses + params, applied
+                # to a decisions_v2 join. Unset facets add nothing (unfiltered).
+                facet_join = ""
+                facet_where = ""
+                facet_params = []
+                if filter_subjects or filter_countries or filter_year_from:
+                    facet_join = "JOIN decisions_v2 d ON d.celex = p.celex"
+                    if filter_subjects:
+                        facet_where += " AND d.subject_matters && %s"
+                        facet_params.append(list(filter_subjects))
+                    if filter_countries:
+                        facet_where += " AND d.country_origin = ANY(%s)"
+                        facet_params.append(list(filter_countries))
+                    if filter_year_from:
+                        facet_where += " AND d.decision_date >= %s AND d.decision_date <= %s"
+                        facet_params.append(f"{filter_year_from}-01-01")
+                        facet_params.append(f"{filter_year_to}-12-31")
+
+                vector_sql = f"""
+                    SELECT p.id, p.celex, NULL::text AS url, p.paragraph_number, p.seq AS paragraph_index, p.text,
+                           1 - (p.embedding <=> %s::vector) AS vector_score, 0::float AS keyword_score
+                    FROM paragraphs_v2 p {facet_join}
+                    WHERE p.embedding IS NOT NULL AND p.section = ANY(%s){facet_where}
+                    ORDER BY p.embedding <=> %s::vector LIMIT %s;
                 """
-                vector_params = (query_embedding, list(V2_SECTIONS), query_embedding, candidate_limit)
-                keyword_sql = """
-                    SELECT id, celex, NULL::text AS url, paragraph_number, seq AS paragraph_index, text,
+                vector_params = (query_embedding, list(V2_SECTIONS), *facet_params,
+                                 query_embedding, candidate_limit)
+                keyword_sql = f"""
+                    SELECT p.id, p.celex, NULL::text AS url, p.paragraph_number, p.seq AS paragraph_index, p.text,
                            0::float AS vector_score,
-                           ts_rank_cd(search_vector, websearch_to_tsquery(%s::regconfig, %s)) AS keyword_score
-                    FROM paragraphs_v2
-                    WHERE section = ANY(%s) AND search_vector @@ websearch_to_tsquery(%s::regconfig, %s)
+                           ts_rank_cd(p.search_vector, websearch_to_tsquery(%s::regconfig, %s)) AS keyword_score
+                    FROM paragraphs_v2 p {facet_join}
+                    WHERE p.section = ANY(%s) AND p.search_vector @@ websearch_to_tsquery(%s::regconfig, %s){facet_where}
                     ORDER BY keyword_score DESC LIMIT %s;
                 """
                 keyword_params = (FTS_CONFIG, retrieval_question, list(V2_SECTIONS),
-                                  FTS_CONFIG, retrieval_question, candidate_limit)
+                                  FTS_CONFIG, retrieval_question, *facet_params, candidate_limit)
             else:
                 vector_sql = """
                     SELECT id, celex, url, paragraph_number, paragraph_index, text,
